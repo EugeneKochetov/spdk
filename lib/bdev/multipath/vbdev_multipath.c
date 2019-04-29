@@ -72,9 +72,15 @@ static struct spdk_bdev_module multipath_if = {
 
 SPDK_BDEV_MODULE_REGISTER(multipath, &multipath_if)
 
+enum multipath_mode {
+	MULTIPATH_MODE_LOADHSARE,
+	MULTIPATH_MODE_SWITCH_ON_FAILURE
+};
+
 /* List of multipath virtual bdev definitions. */
 struct vbdev_multipath_def {
 	char			*vbdev_name;
+	enum multipath_mode	mode;
 	char			*bdev_names[MULTIPATH_MAX_PATHS];
 	TAILQ_ENTRY(vbdev_multipath_def)	link;
 };
@@ -126,7 +132,7 @@ multipath_lookup_vbdev_def(const char *vbdev_name)
 }
 
 static int
-multipath_insert_vbdev_def(const char *vbdev_name, const char **bdev_names)
+multipath_insert_vbdev_def(const char *vbdev_name, enum multipath_mode mode, const char **bdev_names)
 {
 	struct vbdev_multipath_def *def;
 
@@ -150,6 +156,7 @@ multipath_insert_vbdev_def(const char *vbdev_name, const char **bdev_names)
 		SPDK_ERRLOG("could not strdup vbdev name %s\n", vbdev_name);
 		goto err;
 	}
+	def->mode = mode;
 
 	TAILQ_INSERT_TAIL(&g_mp_defs, def, link);
 	return 0;
@@ -164,6 +171,8 @@ vbdev_multipath_init(void)
 {
 	struct spdk_conf_section *sp = NULL;
 	const char *conf_vbdev_name = NULL;
+	const char *conf_vbdev_mode = NULL;
+	enum multipath_mode mode;
 	const char *conf_bdev_names[MULTIPATH_MAX_PATHS] = { NULL, };
 	int i, rc;
 
@@ -173,7 +182,7 @@ vbdev_multipath_init(void)
 	}
 
 	for (i = 0; ; i++) {
-		int j = 1;
+		int j = 0;
 
 		if (NULL == spdk_conf_section_get_nval(sp, "MP", i)) {
 			break;
@@ -185,17 +194,32 @@ vbdev_multipath_init(void)
 			break;
 		}
 
-		while ((conf_bdev_names[j - 1] = spdk_conf_section_get_nmval(sp, "MP", i, j))) {
-			j ++;
+		conf_vbdev_mode = spdk_conf_section_get_nmval(sp, "MP", i, 1);
+		if (NULL == conf_vbdev_mode) {
+			SPDK_ERRLOG("Multipath configuration missing vbdev mode\n");
+			break;
+		}
+		if (0 == strcasecmp(conf_vbdev_mode, "LoadShare")) {
+			mode = MULTIPATH_MODE_LOADHSARE;
+		} else if (0 == strcasecmp(conf_vbdev_mode, "SwitchOnFailure")) {
+			mode = MULTIPATH_MODE_SWITCH_ON_FAILURE;
+		} else {
+			SPDK_ERRLOG("Multipath configuration wrong vbdev mode: %s\n",
+				    conf_vbdev_mode);
+			break;
 		}
 
-		if (1 == j) {
+		while ((conf_bdev_names[j] = spdk_conf_section_get_nmval(sp, "MP", i, j + 2))) {
+			j++;
+		}
+
+		if (0 == j) {
 			SPDK_ERRLOG("Multipath configuration %s missing bdev names\n",
 				    conf_vbdev_name);
 			break;
 		}
 
-		rc = multipath_insert_vbdev_def(conf_vbdev_name, conf_bdev_names);
+		rc = multipath_insert_vbdev_def(conf_vbdev_name, mode, conf_bdev_names);
 		if (rc != 0) {
 			return rc;
 		}
@@ -231,6 +255,7 @@ enum multipath_desc_status {
 /* List of active multipath vbdevs */
 struct vbdev_multipath {
 	struct spdk_bdev		mp_bdev;
+	enum multipath_mode mode;
 	struct spdk_bdev_desc	*base_desc[MULTIPATH_MAX_PATHS];
 	enum multipath_desc_status base_desc_status[MULTIPATH_MAX_PATHS];
 	TAILQ_ENTRY(vbdev_multipath)	link;
@@ -345,6 +370,7 @@ base_io_channel_add(struct base_io_channel *bch, struct spdk_bdev_desc *desc)
 struct multipath_io_channel {
 	struct base_io_channel	base_ch[MULTIPATH_MAX_PATHS];
 	struct base_io_channel	*curr_ch;
+	struct vbdev_multipath *mp_node;
 };
 
 /*
@@ -460,6 +486,7 @@ vbdev_multipath_ch_create_cb(void *io_device, void *ctx_buf)
 	struct vbdev_multipath *mp_node = io_device;
 
 	memset(mp_ch, 0, sizeof(*mp_ch));
+	mp_ch->mp_node = mp_node;
 	multipath_for_each_path(dsp, mp_node->base_desc) {
 		if (*dsp && mp_node->base_desc_status[dsp - mp_node->base_desc] == MP_DESC_LIVE) {
 			struct base_io_channel *bch = &mp_ch->base_ch[dsp - mp_node->base_desc];
@@ -520,7 +547,11 @@ mp_setup_io_ctx(struct multipath_io_channel *mp_ch, struct multipath_io_ctx *ctx
 	do {
 		if (MP_BASE_CH_LIVE == chp->status) {
 			ctx->orig_ch = ctx->curr_ch = chp;
-			mp_ch->curr_ch = multipath_next_path(chp, mp_ch->base_ch);
+			if (MULTIPATH_MODE_LOADHSARE == mp_ch->mp_node->mode) {
+				mp_ch->curr_ch = multipath_next_path(chp, mp_ch->base_ch);
+				SPDK_DEBUGLOG(SPDK_LOG_VBDEV_MULTIPATH,
+					      "Switched to base channel %p/%p\n", mp_ch, mp_ch->curr_ch);
+			}
 			return true;
 		}
 		chp = multipath_next_path(chp, mp_ch->base_ch);
@@ -542,6 +573,8 @@ mp_advance_io_ctx(struct multipath_io_ctx *ctx)
 
 		if (MP_BASE_CH_LIVE == chp->status) {
 			ctx->curr_ch = chp;
+			SPDK_DEBUGLOG(SPDK_LOG_VBDEV_MULTIPATH,
+				      "Switched to base channel %p/%p\n", mp_ch, mp_ch->curr_ch);
 			return true;
 		}
 	} while (chp != ctx->curr_ch);
@@ -920,6 +953,8 @@ multipath_register_vbdev(const char *vbdev_name)
 				goto out;
 			}
 
+			mp_node->mode = def->mode;
+
 			mp_node->mp_bdev.name = strdup(vbdev_name);
 			if (!mp_node->mp_bdev.name) {
 				SPDK_ERRLOG("could not allocate multipath vbdev %s name.\n", vbdev_name);
@@ -1022,7 +1057,7 @@ vbdev_multipath_create_vbdev(const char *vbdev_name, const char **bdev_names)
 		}
 	}
 
-	rc = multipath_insert_vbdev_def(vbdev_name, bdev_names);
+	rc = multipath_insert_vbdev_def(vbdev_name, MULTIPATH_MODE_LOADHSARE, bdev_names);
 	if (rc) {
 		goto out;
 	}
