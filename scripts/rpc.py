@@ -55,7 +55,7 @@ if __name__ == "__main__":
         print_dict(rpc.rpc_get_methods(args.client,
                                        current=args.current))
 
-    p = subparsers.add_parser('rpc_get_methods', help='Get list of supported RPC methods', aliases=['get_rpc_methods'])
+    p = subparsers.add_parser('rpc_get_methods', help='Get list of supported RPC methods')
     p.add_argument('-c', '--current', help='Get list of RPC methods only callable in the current state.', action='store_true')
     p.set_defaults(func=rpc_get_methods)
 
@@ -1057,7 +1057,7 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     def set_log_flag(args):
         rpc.log.set_log_flag(args.client, flag=args.flag)
 
-    p = subparsers.add_parser('set_log_flag', help='set log flag', aliases=['set_trace_flag'])
+    p = subparsers.add_parser('set_log_flag', help='set log flag')
     p.add_argument(
         'flag', help='log flag we want to set. (for example "nvme").')
     p.set_defaults(func=set_log_flag)
@@ -1065,7 +1065,7 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     def clear_log_flag(args):
         rpc.log.clear_log_flag(args.client, flag=args.flag)
 
-    p = subparsers.add_parser('clear_log_flag', help='clear log flag', aliases=['clear_trace_flag'])
+    p = subparsers.add_parser('clear_log_flag', help='clear log flag')
     p.add_argument(
         'flag', help='log flag we want to clear. (for example "nvme").')
     p.set_defaults(func=clear_log_flag)
@@ -1073,7 +1073,7 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     def get_log_flags(args):
         print_dict(rpc.log.get_log_flags(args.client))
 
-    p = subparsers.add_parser('get_log_flags', help='get log flags', aliases=['get_trace_flags'])
+    p = subparsers.add_parser('get_log_flags', help='get log flags')
     p.set_defaults(func=get_log_flags)
 
     def set_log_level(args):
@@ -1869,7 +1869,7 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
 
     def check_called_name(name):
         if name in deprecated_aliases:
-            print("{} is deprecated, use {} instead.".format(name, deprecated_aliases[name]), file=sys.stderr)
+            sys.stderr.write("{} is deprecated, use {} instead.".format(name, deprecated_aliases[name]))
 
     class dry_run_client:
         def call(self, method, params=None):
