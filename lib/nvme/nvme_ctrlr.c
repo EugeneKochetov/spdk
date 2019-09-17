@@ -1555,6 +1555,13 @@ nvme_ctrlr_update_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 
 		nsdata = &ctrlr->nsdata[nsid - 1];
 
+		if (nsdata->ncap && spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid)) {
+			if (0 != nvme_ns_update(ns)) {
+				SPDK_ERRLOG("Failed to update active NS %u\n", nsid);
+				continue;
+			}
+		}
+
 		if ((nsdata->ncap == 0) && spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid)) {
 			if (nvme_ns_construct(ns, nsid, ctrlr) != 0) {
 				continue;

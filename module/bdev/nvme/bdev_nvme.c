@@ -895,11 +895,31 @@ nvme_ctrlr_update_ns_bdevs(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr)
 	struct spdk_nvme_ctrlr	*ctrlr = nvme_bdev_ctrlr->ctrlr;
 	uint32_t		i;
 	struct nvme_bdev	*bdev;
+	struct spdk_nvme_ns	*ns;
+	int			rc;
 
 	for (i = 0; i < nvme_bdev_ctrlr->num_ns; i++) {
 		uint32_t	nsid = i + 1;
 
 		bdev = &nvme_bdev_ctrlr->bdevs[i];
+		if (bdev->active && spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid)) {
+			/* NS is still there but attributes may have changed */
+			ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+			if (bdev->disk.blockcnt != spdk_nvme_ns_get_num_sectors(ns)) {
+				SPDK_NOTICELOG("NSID %u is resized: bdev name %s, old size %lu, new size %lu\n",
+					       nsid,
+					       bdev->disk.name,
+					       bdev->disk.blockcnt,
+					       spdk_nvme_ns_get_num_sectors(ns));
+				rc = spdk_bdev_notify_blockcnt_change(&bdev->disk,
+								      spdk_nvme_ns_get_num_sectors(ns));
+				if (rc != 0) {
+					SPDK_ERRLOG("Could not change num blocks for nvme bdev: name %s, errno: %d.\n",
+						    bdev->disk.name, rc);
+				}
+			}
+		}
+
 		if (!bdev->active && spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid)) {
 			SPDK_NOTICELOG("NSID %u to be added\n", nsid);
 			nvme_ctrlr_create_bdev(nvme_bdev_ctrlr, nsid);

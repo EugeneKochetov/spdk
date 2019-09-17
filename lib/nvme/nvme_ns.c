@@ -358,3 +358,9 @@ void nvme_ns_destruct(struct spdk_nvme_ns *ns)
 	ns->sectors_per_stripe = 0;
 	ns->flags = 0;
 }
+
+int nvme_ns_update(struct spdk_nvme_ns *ns)
+{
+	/* @todo: do we need any locks here? there is ctrlr lock in identify ns */
+	return nvme_ctrlr_identify_ns(ns);
+}
