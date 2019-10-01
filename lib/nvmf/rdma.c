@@ -257,6 +257,8 @@ struct spdk_nvmf_rdma_request_data {
 	struct spdk_nvmf_rdma_wr	sig_wr;
 	struct ibv_mr			*sig_mr;
 	struct ibv_sge			sig_sgl;
+	void				*buffer;
+	bool				registered;
 #endif
 };
 
@@ -707,7 +709,7 @@ nvmf_rdma_dump_qpair_contents(struct spdk_nvmf_rdma_qpair *rqpair)
 }
 
 static void
-nvmf_rdma_resources_destroy(struct spdk_nvmf_rdma_resources *resources)
+nvmf_rdma_resources_destroy(struct spdk_nvmf_transport *transport, struct spdk_nvmf_rdma_resources *resources)
 {
 #ifdef SPDK_CONFIG_RDMA_SIG_OFFLOAD
 	struct spdk_nvmf_rdma_request *rdma_req;
@@ -717,6 +719,7 @@ nvmf_rdma_resources_destroy(struct spdk_nvmf_rdma_resources *resources)
 		rdma_req = &resources->reqs[i];
 		if (rdma_req->data.sig_mr) {
 			ibv_dereg_mr(rdma_req->data.sig_mr);
+			spdk_mempool_put(transport->data_buf_pool, rdma_req->data.buffer);
 			SPDK_DEBUGLOG(SPDK_LOG_RDMA, "Destroyed Signature offload MR #%u: %p\n",
 				      i, rdma_req->data.sig_mr);
 		}
@@ -745,7 +748,7 @@ nvmf_rdma_resources_destroy(struct spdk_nvmf_rdma_resources *resources)
 
 
 static struct spdk_nvmf_rdma_resources *
-nvmf_rdma_resources_create(struct spdk_nvmf_rdma_resource_opts *opts)
+nvmf_rdma_resources_create(struct spdk_nvmf_transport *transport, struct spdk_nvmf_rdma_resource_opts *opts)
 {
 	struct spdk_nvmf_rdma_resources	*resources;
 	struct spdk_nvmf_rdma_request	*rdma_req;
@@ -905,6 +908,12 @@ nvmf_rdma_resources_create(struct spdk_nvmf_rdma_resource_opts *opts)
 			}
 			SPDK_DEBUGLOG(SPDK_LOG_RDMA, "Created Signature offload MR #%u: %p\n",
 				      i, rdma_req->data.sig_mr);
+
+			rdma_req->data.buffer = spdk_mempool_get(transport->data_buf_pool);
+			if (!rdma_req->data.buffer) {
+				SPDK_ERRLOG("Not enough buffers to pre-allocate for signature MR\n");
+				goto cleanup;
+			}
 		}
 #endif
 
@@ -916,7 +925,7 @@ nvmf_rdma_resources_create(struct spdk_nvmf_rdma_resource_opts *opts)
 	return resources;
 
 cleanup:
-	nvmf_rdma_resources_destroy(resources);
+	nvmf_rdma_resources_destroy(transport, resources);
 	return NULL;
 }
 
@@ -970,7 +979,7 @@ spdk_nvmf_rdma_qpair_destroy(struct spdk_nvmf_rdma_qpair *rqpair)
 	}
 
 	if (rqpair->srq == NULL && rqpair->resources != NULL) {
-		nvmf_rdma_resources_destroy(rqpair->resources);
+		nvmf_rdma_resources_destroy(rqpair->qpair.transport, rqpair->resources);
 	}
 
 	free(rqpair);
@@ -1153,7 +1162,7 @@ spdk_nvmf_rdma_qpair_initialize(struct spdk_nvmf_qpair *qpair)
 		opts.max_queue_depth = rqpair->max_queue_depth;
 		opts.in_capsule_data_size = transport->opts.in_capsule_data_size;
 
-		rqpair->resources = nvmf_rdma_resources_create(&opts);
+		rqpair->resources = nvmf_rdma_resources_create(transport, &opts);
 
 		if (!rqpair->resources) {
 			SPDK_ERRLOG("Unable to allocate resources for receive queue.\n");
@@ -1670,9 +1679,7 @@ nvmf_rdma_fill_buffers(struct spdk_nvmf_rdma_transport *rtransport,
 
 	while (remaining_length) {
 		iovcnt = rdma_req->req.iovcnt;
-		rdma_req->req.iov[iovcnt].iov_base = (void *)((uintptr_t)(rdma_req->req.buffers[iovcnt] +
-						     NVMF_DATA_BUFFER_MASK) &
-						     ~NVMF_DATA_BUFFER_MASK);
+		rdma_req->req.iov[iovcnt].iov_base = (void *)NVMF_ALIGN_DATA_BUFFER(rdma_req->req.buffers[iovcnt]);
 		rdma_req->req.iov[iovcnt].iov_len  = spdk_min(remaining_length,
 						     rtransport->transport.opts.io_unit_size);
 		rdma_req->req.iovcnt++;
@@ -1718,6 +1725,13 @@ spdk_nvmf_rdma_request_fill_iovs(struct spdk_nvmf_rdma_transport *rtransport,
 
 	num_buffers = SPDK_CEIL_DIV(rdma_req->req.length, rtransport->transport.opts.io_unit_size);
 
+#ifdef SPDK_CONFIG_RDMA_SIG_OFFLOAD
+	/* @todo: check device caps */
+	if (1 == num_buffers) {
+		rdma_req->req.buffers[0] = (void *)NVMF_ALIGN_DATA_BUFFER(rdma_req->data.buffer);
+		assert((uintptr_t)rdma_req->req.buffers[0] - (uintptr_t)rdma_req->data.buffer + rdma_req->req.length < rtransport->transport.opts.io_unit_size);
+	} else
+#endif
 	if (spdk_nvmf_request_get_buffers(&rdma_req->req, &rgroup->group, &rtransport->transport,
 					  num_buffers)) {
 		return -ENOMEM;
@@ -1738,6 +1752,12 @@ spdk_nvmf_rdma_request_fill_iovs(struct spdk_nvmf_rdma_transport *rtransport,
 	return rc;
 
 err_exit:
+#ifdef SPDK_CONFIG_RDMA_SIG_OFFLOAD
+	/* @todo: check device caps */
+	if (1 == num_buffers) {
+		rdma_req->req.buffers[0] = NULL;
+	} else
+#endif
 	spdk_nvmf_request_free_buffers(&rdma_req->req, &rgroup->group, &rtransport->transport, num_buffers);
 	while (i) {
 		i--;
@@ -1847,25 +1867,34 @@ err_exit:
 
 #ifdef SPDK_CONFIG_RDMA_SIG_OFFLOAD
 static int
-spdk_nvmf_rdma_reg_sig_mr(struct spdk_nvmf_rdma_request *rdma_req)
+spdk_nvmf_rdma_reg_sig_mr(struct spdk_nvmf_rdma_qpair *rqpair,
+			  struct spdk_nvmf_rdma_request *rdma_req)
 {
-	struct spdk_nvmf_rdma_qpair *rqpair;
+	struct spdk_nvmf_transport *transport = rqpair->qpair.transport;
+	struct spdk_nvmf_rdma_device *device = rqpair->poller->device;
 	struct ibv_exp_sig_attrs sig_attrs = {};
 	struct ibv_exp_send_wr wr = {};
 	struct ibv_exp_send_wr *bad_wr;
+	struct ibv_sge sgl;
+	uint64_t translation_len;
 	int rc;
 
-	sig_attrs.check_mask = 0xff;
+	if (rdma_req->data.registered) {
+		return 0;
+	}
+
+	/* @todo: Only guard validation is supported for pre-registered sig MRs */
+	sig_attrs.check_mask = 0x0f;
 	/* No signature on wire */
 	sig_attrs.wire.sig_type = IBV_EXP_SIG_TYPE_NONE;
 	/* T10 DIF signature in memory */
 	sig_attrs.mem.sig_type = IBV_EXP_SIG_TYPE_T10_DIF;
 	sig_attrs.mem.sig.dif.bg_type = IBV_EXP_T10DIF_CRC;
-	sig_attrs.mem.sig.dif.pi_interval = rdma_req->dif_ctx.guard_interval;
+	sig_attrs.mem.sig.dif.pi_interval = 512; /* rdma_req->dif_ctx.guard_interval; */
 	sig_attrs.mem.sig.dif.bg = 0;
 	sig_attrs.mem.sig.dif.app_tag = 0;
-	sig_attrs.mem.sig.dif.ref_tag = rdma_req->dif_ctx.init_ref_tag;
-	sig_attrs.mem.sig.dif.ref_remap = 1;
+	sig_attrs.mem.sig.dif.ref_tag = 0; /* rdma_req->dif_ctx.init_ref_tag; */
+	sig_attrs.mem.sig.dif.ref_remap = 0;
 	sig_attrs.mem.sig.dif.app_escape = 1;
 	sig_attrs.mem.sig.dif.ref_escape = 1;
 	sig_attrs.mem.sig.dif.apptag_check_mask = rdma_req->dif_ctx.apptag_mask;
@@ -1874,17 +1903,37 @@ spdk_nvmf_rdma_reg_sig_mr(struct spdk_nvmf_rdma_request *rdma_req)
 	wr.ext_op.sig_handover.sig_attrs = &sig_attrs;
 	wr.ext_op.sig_handover.sig_mr = rdma_req->data.sig_mr;
 	wr.ext_op.sig_handover.access_flags = IBV_ACCESS_LOCAL_WRITE;
-	wr.sg_list = rdma_req->data.sgl;
-	wr.num_sge = rdma_req->req.iovcnt;
+	sgl.addr = (uintptr_t)NVMF_ALIGN_DATA_BUFFER(rdma_req->data.buffer);
+	sgl.length = transport->opts.io_unit_size;
+	translation_len = sgl.length;
+	sgl.lkey = ((struct ibv_mr *)spdk_mem_map_translate(device->map,
+							    NVMF_ALIGN_DATA_BUFFER(rdma_req->data.buffer),
+							    &translation_len))->lkey;
+	if (translation_len < sgl.length) {
+		SPDK_ERRLOG("Data buffer split over multiple RDMA Memory Regions\n");
+		return -EINVAL;
+	}
+	wr.sg_list = &sgl;
+	wr.num_sge = 1;
+	/* Only one SGE is supported at the moment */
+	assert(1 == wr.num_sge);
 
-	rqpair = SPDK_CONTAINEROF(rdma_req->req.qpair, struct spdk_nvmf_rdma_qpair, qpair);
 	/* @todo: WR should be chained with READ or WRITE and/or queue depth must be checked */
+	SPDK_DEBUGLOG(SPDK_LOG_RDMA, "Pre-registering Sig MR: qp %p, init_ref_tag %u, sig_mr %p, "
+		      "buf_addr %p, buf_len %u, lkey %u\n",
+		      rqpair->qp,
+		      wr.ext_op.sig_handover.sig_attrs->mem.sig.dif.ref_tag,
+		      wr.ext_op.sig_handover.sig_mr,
+		      (void *)wr.sg_list[0].addr,
+		      wr.sg_list[0].length,
+		      wr.sg_list[0].lkey);
 	rc = ibv_exp_post_send(rqpair->qp, &wr, &bad_wr);
 	if (rc) {
 		SPDK_ERRLOG("Failed to post REG_SIG_MR work request, errno %d\n", rc);
 		assert(0);
 		return rc;
 	}
+	rdma_req->data.registered = true;
 
 	return 0;
 }
@@ -1940,9 +1989,11 @@ spdk_nvmf_rdma_check_sig_mr(struct spdk_nvmf_rdma_request *rdma_req)
 static int
 spdk_nvmf_rdma_offload_signature(struct spdk_nvmf_rdma_request *rdma_req)
 {
+	struct spdk_nvmf_rdma_qpair *rqpair;
 	int rc;
 
-	rc = spdk_nvmf_rdma_reg_sig_mr(rdma_req);
+	rqpair = SPDK_CONTAINEROF(rdma_req->req.qpair, struct spdk_nvmf_rdma_qpair, qpair);
+	rc = spdk_nvmf_rdma_reg_sig_mr(rqpair, rdma_req);
 	if (rc) {
 		SPDK_ERRLOG("Failed to register signature MR\n");
 		return rc;
@@ -2104,6 +2155,13 @@ nvmf_rdma_request_free(struct spdk_nvmf_rdma_request *rdma_req,
 	if (rdma_req->req.data_from_pool) {
 		rgroup = rqpair->poller->group;
 
+#ifdef SPDK_CONFIG_RDMA_SIG_OFFLOAD
+		/* @todo: may multi_sgl also have just one buffer? */
+		/* @todo: check device caps */
+		if (1 == rdma_req->req.iovcnt) {
+			rdma_req->req.buffers[0] = NULL;
+		} else
+#endif
 		spdk_nvmf_request_free_buffers(&rdma_req->req, &rgroup->group, &rtransport->transport,
 					       rdma_req->req.iovcnt);
 	}
@@ -3339,7 +3397,7 @@ spdk_nvmf_rdma_poll_group_create(struct spdk_nvmf_transport *transport)
 			opts.max_queue_depth = poller->max_srq_depth;
 			opts.in_capsule_data_size = transport->opts.in_capsule_data_size;
 
-			poller->resources = nvmf_rdma_resources_create(&opts);
+			poller->resources = nvmf_rdma_resources_create(transport, &opts);
 			if (!poller->resources) {
 				SPDK_ERRLOG("Unable to allocate resources for shared receive queue.\n");
 				spdk_nvmf_rdma_poll_group_destroy(&rgroup->group);
@@ -3395,7 +3453,7 @@ spdk_nvmf_rdma_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group)
 		}
 
 		if (poller->srq) {
-			nvmf_rdma_resources_destroy(poller->resources);
+			nvmf_rdma_resources_destroy(group->transport, poller->resources);
 			ibv_destroy_srq(poller->srq);
 			SPDK_DEBUGLOG(SPDK_LOG_RDMA, "Destroyed RDMA shared queue %p\n", poller->srq);
 		}
@@ -3786,13 +3844,8 @@ spdk_nvmf_rdma_poller_poll(struct spdk_nvmf_rdma_transport *rtransport,
 					 */
 					spdk_nvmf_rdma_check_sig_mr(rdma_req);
 				}
-				if (spdk_nvmf_rdma_inv_sig_mr(rdma_req)) {
-					SPDK_ERRLOG("Failed to invalidate signature MR\n");
-				}
 				rdma_req->data.wr.sg_list = rdma_req->data.sgl;
 				rdma_req->data.sig_offloaded = false;
-				/* We have to wait for invalidate completion to release request */
-				break;
 			}
 #endif
 			rdma_req->state = RDMA_REQUEST_STATE_COMPLETED;
