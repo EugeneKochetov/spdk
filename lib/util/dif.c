@@ -303,10 +303,14 @@ _dif_generate(void *_dif, uint16_t guard, uint32_t offset_blocks,
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
 		to_be16(&dif->guard, guard);
+	} else {
+		to_be16(&dif->guard, 0);
 	}
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_APPTAG_CHECK) {
 		to_be16(&dif->app_tag, ctx->app_tag);
+	} else {
+		to_be16(&dif->app_tag, 0);
 	}
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_REFTAG_CHECK) {
@@ -321,6 +325,8 @@ _dif_generate(void *_dif, uint16_t guard, uint32_t offset_blocks,
 		}
 
 		to_be32(&dif->ref_tag, ref_tag);
+	} else {
+		to_be32(&dif->ref_tag, 0);
 	}
 }
 
