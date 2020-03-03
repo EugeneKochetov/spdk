@@ -65,6 +65,11 @@ spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 	return -1;
 }
 
+int32_t spdk_nvme_ctrlr_active_ns_idx(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+{
+	return -1;
+}
+
 static void
 test_nvme_ns_construct(void)
 {

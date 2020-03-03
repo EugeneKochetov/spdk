@@ -944,6 +944,7 @@ uint32_t spdk_nvme_ctrlr_get_first_active_ns(struct spdk_nvme_ctrlr *ctrlr);
  */
 uint32_t spdk_nvme_ctrlr_get_next_active_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t prev_nsid);
 
+int32_t spdk_nvme_ctrlr_active_ns_idx(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid);
 /**
  * Determine if a particular log page is supported by the given NVMe controller.
  *

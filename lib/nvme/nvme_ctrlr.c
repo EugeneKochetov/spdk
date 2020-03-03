@@ -889,10 +889,6 @@ nvme_ctrlr_state_string(enum nvme_ctrlr_state state)
 		return "set number of queues";
 	case NVME_CTRLR_STATE_WAIT_FOR_SET_NUM_QUEUES:
 		return "wait for set number of queues";
-	case NVME_CTRLR_STATE_GET_NUM_QUEUES:
-		return "get number of queues";
-	case NVME_CTRLR_STATE_WAIT_FOR_GET_NUM_QUEUES:
-		return "wait for get number of queues";
 	case NVME_CTRLR_STATE_CONSTRUCT_NS:
 		return "construct namespaces";
 	case NVME_CTRLR_STATE_IDENTIFY_ACTIVE_NS:
@@ -1286,9 +1282,11 @@ nvme_ctrlr_identify_active_ns(struct spdk_nvme_ctrlr *ctrlr)
 	uint32_t				i;
 	uint32_t				num_pages;
 	uint32_t				next_nsid = 0;
-	uint32_t				*new_ns_list = NULL;
+	uint32_t				*new_ns_list = NULL, *tmp;
+	uint32_t				*ns_list_page = NULL;
+	uint32_t				nn = ctrlr->cdata.nn;
 
-	if (ctrlr->num_ns == 0) {
+	if (nn == 0) {
 		spdk_free(ctrlr->active_ns_list);
 		ctrlr->active_ns_list = NULL;
 
@@ -1298,18 +1296,19 @@ nvme_ctrlr_identify_active_ns(struct spdk_nvme_ctrlr *ctrlr)
 	/*
 	 * The allocated size must be a multiple of sizeof(struct spdk_nvme_ns_list)
 	 */
-	num_pages = (ctrlr->num_ns * sizeof(new_ns_list[0]) - 1) / sizeof(struct spdk_nvme_ns_list) + 1;
-	new_ns_list = spdk_zmalloc(num_pages * sizeof(struct spdk_nvme_ns_list), ctrlr->page_size,
+	num_pages = (nn * sizeof(new_ns_list[0]) - 1) / sizeof(struct spdk_nvme_ns_list) + 1;
+	ns_list_page = spdk_zmalloc(sizeof(struct spdk_nvme_ns_list), ctrlr->page_size,
 				   NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA | SPDK_MALLOC_SHARE);
-	if (!new_ns_list) {
-		SPDK_ERRLOG("Failed to allocate active_ns_list!\n");
+	if (!ns_list_page) {
+		SPDK_ERRLOG("Failed to allocate ns_list_page!\n");
 		return -ENOMEM;
 	}
 
 	status = malloc(sizeof(*status));
 	if (!status) {
 		SPDK_ERRLOG("Failed to allocate status tracker\n");
-		return -ENOMEM;
+		rc = -ENOMEM;
+		goto fail;
 	}
 
 	if (ctrlr->vs.raw >= SPDK_NVME_VERSION(1, 1, 0) && !(ctrlr->quirks & NVME_QUIRK_IDENTIFY_CNS)) {
@@ -1318,8 +1317,9 @@ nvme_ctrlr_identify_active_ns(struct spdk_nvme_ctrlr *ctrlr)
 		 * there are no more active namespaces
 		 */
 		for (i = 0; i < num_pages; i++) {
+			/* @todo: Is it guaranteed that target will write the whole buffer? Or shall we memset? */
 			rc = nvme_ctrlr_cmd_identify(ctrlr, SPDK_NVME_IDENTIFY_ACTIVE_NS_LIST, 0, next_nsid,
-						     &new_ns_list[1024 * i], sizeof(struct spdk_nvme_ns_list),
+						     ns_list_page, sizeof(struct spdk_nvme_ns_list),
 						     nvme_completion_poll_cb, status);
 			if (rc != 0) {
 				goto fail;
@@ -1329,6 +1329,16 @@ nvme_ctrlr_identify_active_ns(struct spdk_nvme_ctrlr *ctrlr)
 				rc = -ENXIO;
 				goto fail;
 			}
+
+			tmp = (uint32_t *)realloc(new_ns_list, (i + 1) * sizeof(struct spdk_nvme_ns_list));
+			if (!tmp) {
+				SPDK_ERRLOG("Failed to allocate active_ns_list: page number %u\n", i);
+				rc = -ENOMEM;
+				goto fail;
+			}
+
+			new_ns_list = tmp;
+			memcpy(&new_ns_list[i * 1024], ns_list_page, sizeof(struct spdk_nvme_ns_list));
 			next_nsid = new_ns_list[1024 * i + 1023];
 			if (next_nsid == 0) {
 				/*
@@ -1343,7 +1353,14 @@ nvme_ctrlr_identify_active_ns(struct spdk_nvme_ctrlr *ctrlr)
 		 * Controller doesn't support active ns list CNS 0x02 so dummy up
 		 * an active ns list
 		 */
-		for (i = 0; i < ctrlr->num_ns; i++) {
+		new_ns_list = (uint32_t *)calloc(nn, sizeof(*new_ns_list));
+		if (!new_ns_list) {
+			SPDK_ERRLOG("Failed to allocate active_ns_list: cdata.nn %u\n", nn);
+			rc = -ENOMEM;
+			goto fail;
+		}
+
+		for (i = 0; i < nn; i++) {
 			new_ns_list[i] = i + 1;
 		}
 	}
@@ -1352,16 +1369,22 @@ nvme_ctrlr_identify_active_ns(struct spdk_nvme_ctrlr *ctrlr)
 	 * Now that that the list is properly setup, we can swap it in to the ctrlr and
 	 * free up the previous one.
 	 */
-	spdk_free(ctrlr->active_ns_list);
+	free(ctrlr->active_ns_list);
 	ctrlr->active_ns_list = new_ns_list;
 	free(status);
+	spdk_free(ns_list_page);
+
+	/* Get number of active namespaces */
+	for (i = 0; new_ns_list[i] != 0; ++i);
+	ctrlr->num_ns = i;
 
 	return 0;
 fail:
 	if (!status->timed_out) {
 		free(status);
 	}
-	spdk_free(new_ns_list);
+	spdk_free(ns_list_page);
+	free(new_ns_list);
 	return rc;
 }
 
@@ -1403,7 +1426,7 @@ nvme_ctrlr_identify_ns_async(struct spdk_nvme_ns *ns)
 	struct spdk_nvme_ctrlr *ctrlr = ns->ctrlr;
 	struct spdk_nvme_ns_data *nsdata;
 
-	nsdata = &ctrlr->nsdata[ns->id - 1];
+	nsdata = &ctrlr->nsdata[spdk_nvme_ctrlr_active_ns_idx(ctrlr, ns->id)];
 
 	nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_WAIT_FOR_IDENTIFY_NS,
 			     ctrlr->opts.admin_timeout_ms);
@@ -1517,50 +1540,11 @@ nvme_ctrlr_identify_id_desc_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 static void
 nvme_ctrlr_set_num_queues_done(void *arg, const struct spdk_nvme_cpl *cpl)
 {
-	struct spdk_nvme_ctrlr *ctrlr = (struct spdk_nvme_ctrlr *)arg;
-
-	if (spdk_nvme_cpl_is_error(cpl)) {
-		SPDK_ERRLOG("Set Features - Number of Queues failed!\n");
-	}
-	nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_GET_NUM_QUEUES,
-			     ctrlr->opts.admin_timeout_ms);
-}
-
-static int
-nvme_ctrlr_set_num_queues(struct spdk_nvme_ctrlr *ctrlr)
-{
-	int rc;
-
-	if (ctrlr->opts.num_io_queues > SPDK_NVME_MAX_IO_QUEUES) {
-		SPDK_NOTICELOG("Limiting requested num_io_queues %u to max %d\n",
-			       ctrlr->opts.num_io_queues, SPDK_NVME_MAX_IO_QUEUES);
-		ctrlr->opts.num_io_queues = SPDK_NVME_MAX_IO_QUEUES;
-	} else if (ctrlr->opts.num_io_queues < 1) {
-		SPDK_NOTICELOG("Requested num_io_queues 0, increasing to 1\n");
-		ctrlr->opts.num_io_queues = 1;
-	}
-
-	nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_WAIT_FOR_SET_NUM_QUEUES,
-			     ctrlr->opts.admin_timeout_ms);
-
-	rc = nvme_ctrlr_cmd_set_num_queues(ctrlr, ctrlr->opts.num_io_queues,
-					   nvme_ctrlr_set_num_queues_done, ctrlr);
-	if (rc != 0) {
-		nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_ERROR, NVME_TIMEOUT_INFINITE);
-		return rc;
-	}
-
-	return 0;
-}
-
-static void
-nvme_ctrlr_get_num_queues_done(void *arg, const struct spdk_nvme_cpl *cpl)
-{
 	uint32_t cq_allocated, sq_allocated, min_allocated, i;
 	struct spdk_nvme_ctrlr *ctrlr = (struct spdk_nvme_ctrlr *)arg;
 
 	if (spdk_nvme_cpl_is_error(cpl)) {
-		SPDK_ERRLOG("Get Features - Number of Queues failed!\n");
+		SPDK_ERRLOG("Set Features - Number of Queues failed!\n");
 		ctrlr->opts.num_io_queues = 0;
 	} else {
 		/*
@@ -1592,20 +1576,29 @@ nvme_ctrlr_get_num_queues_done(void *arg, const struct spdk_nvme_cpl *cpl)
 	for (i = 1; i <= ctrlr->opts.num_io_queues; i++) {
 		spdk_bit_array_set(ctrlr->free_io_qids, i);
 	}
-	nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_CONSTRUCT_NS,
+	nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_IDENTIFY_ACTIVE_NS,
 			     ctrlr->opts.admin_timeout_ms);
 }
 
 static int
-nvme_ctrlr_get_num_queues(struct spdk_nvme_ctrlr *ctrlr)
+nvme_ctrlr_set_num_queues(struct spdk_nvme_ctrlr *ctrlr)
 {
 	int rc;
 
-	nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_WAIT_FOR_GET_NUM_QUEUES,
+	if (ctrlr->opts.num_io_queues > SPDK_NVME_MAX_IO_QUEUES) {
+		SPDK_NOTICELOG("Limiting requested num_io_queues %u to max %d\n",
+			       ctrlr->opts.num_io_queues, SPDK_NVME_MAX_IO_QUEUES);
+		ctrlr->opts.num_io_queues = SPDK_NVME_MAX_IO_QUEUES;
+	} else if (ctrlr->opts.num_io_queues < 1) {
+		SPDK_NOTICELOG("Requested num_io_queues 0, increasing to 1\n");
+		ctrlr->opts.num_io_queues = 1;
+	}
+
+	nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_WAIT_FOR_SET_NUM_QUEUES,
 			     ctrlr->opts.admin_timeout_ms);
 
-	/* Obtain the number of queues allocated using Get Features. */
-	rc = nvme_ctrlr_cmd_get_num_queues(ctrlr, nvme_ctrlr_get_num_queues_done, ctrlr);
+	rc = nvme_ctrlr_cmd_set_num_queues(ctrlr, ctrlr->opts.num_io_queues,
+					   nvme_ctrlr_set_num_queues_done, ctrlr);
 	if (rc != 0) {
 		nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_ERROR, NVME_TIMEOUT_INFINITE);
 		return rc;
@@ -1623,17 +1616,14 @@ nvme_ctrlr_set_keep_alive_timeout_done(void *arg, const struct spdk_nvme_cpl *cp
 	if (spdk_nvme_cpl_is_error(cpl)) {
 		SPDK_ERRLOG("Keep alive timeout Get Feature failed: SC %x SCT %x\n",
 			    cpl->status.sc, cpl->status.sct);
-		ctrlr->opts.keep_alive_timeout_ms = 0;
-		nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_ERROR, NVME_TIMEOUT_INFINITE);
-		return;
-	}
+	} else {
+		if (ctrlr->opts.keep_alive_timeout_ms != cpl->cdw0) {
+			SPDK_DEBUGLOG(SPDK_LOG_NVME, "Controller adjusted keep alive timeout to %u ms\n",
+				      cpl->cdw0);
+		}
 
-	if (ctrlr->opts.keep_alive_timeout_ms != cpl->cdw0) {
-		SPDK_DEBUGLOG(SPDK_LOG_NVME, "Controller adjusted keep alive timeout to %u ms\n",
-			      cpl->cdw0);
+		ctrlr->opts.keep_alive_timeout_ms = cpl->cdw0;
 	}
-
-	ctrlr->opts.keep_alive_timeout_ms = cpl->cdw0;
 
 	keep_alive_interval_ms = ctrlr->opts.keep_alive_timeout_ms / 2;
 	if (keep_alive_interval_ms == 0) {
@@ -1773,21 +1763,21 @@ nvme_ctrlr_destruct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 		ctrlr->nsdata = NULL;
 	}
 
-	spdk_free(ctrlr->active_ns_list);
+	free(ctrlr->active_ns_list);
 	ctrlr->active_ns_list = NULL;
 }
 
 static void
 nvme_ctrlr_update_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 {
-	uint32_t i, nn = ctrlr->cdata.nn;
+	uint32_t i, num_ns = ctrlr->num_ns;
 	struct spdk_nvme_ns_data *nsdata;
 
-	for (i = 0; i < nn; i++) {
+	for (i = 0; i < num_ns; i++) {
 		struct spdk_nvme_ns	*ns = &ctrlr->ns[i];
-		uint32_t		nsid = i + 1;
+		uint32_t		nsid = ns->id;
 
-		nsdata = &ctrlr->nsdata[nsid - 1];
+		nsdata = &ctrlr->nsdata[i];
 
 		if ((nsdata->ncap == 0) && spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid)) {
 			if (nvme_ns_construct(ns, nsid, ctrlr) != 0) {
@@ -1805,35 +1795,25 @@ static int
 nvme_ctrlr_construct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 {
 	int rc = 0;
-	uint32_t nn = ctrlr->cdata.nn;
 
-	/* ctrlr->num_ns may be 0 (startup) or a different number of namespaces (reset),
-	 * so check if we need to reallocate.
-	 */
-	if (nn != ctrlr->num_ns) {
-		nvme_ctrlr_destruct_namespaces(ctrlr);
+	if (ctrlr->num_ns == 0) {
+		SPDK_WARNLOG("controller has 0 namespaces\n");
+		return 0;
+	}
 
-		if (nn == 0) {
-			SPDK_WARNLOG("controller has 0 namespaces\n");
-			return 0;
-		}
+	ctrlr->ns = spdk_zmalloc(ctrlr->num_ns * sizeof(struct spdk_nvme_ns), 64, NULL,
+				 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);
+	if (ctrlr->ns == NULL) {
+		rc = -ENOMEM;
+		goto fail;
+	}
 
-		ctrlr->ns = spdk_zmalloc(nn * sizeof(struct spdk_nvme_ns), 64, NULL,
-					 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);
-		if (ctrlr->ns == NULL) {
-			rc = -ENOMEM;
-			goto fail;
-		}
-
-		ctrlr->nsdata = spdk_zmalloc(nn * sizeof(struct spdk_nvme_ns_data), 64,
-					     NULL, SPDK_ENV_SOCKET_ID_ANY,
-					     SPDK_MALLOC_SHARE | SPDK_MALLOC_DMA);
-		if (ctrlr->nsdata == NULL) {
-			rc = -ENOMEM;
-			goto fail;
-		}
-
-		ctrlr->num_ns = nn;
+	ctrlr->nsdata = spdk_zmalloc(ctrlr->num_ns * sizeof(struct spdk_nvme_ns_data), 64,
+				     NULL, SPDK_ENV_SOCKET_ID_ANY,
+				     SPDK_MALLOC_SHARE | SPDK_MALLOC_DMA);
+	if (ctrlr->nsdata == NULL) {
+		rc = -ENOMEM;
+		goto fail;
 	}
 
 	return 0;
@@ -2417,17 +2397,9 @@ nvme_ctrlr_process_init(struct spdk_nvme_ctrlr *ctrlr)
 		spdk_nvme_qpair_process_completions(ctrlr->adminq, 0);
 		break;
 
-	case NVME_CTRLR_STATE_GET_NUM_QUEUES:
-		rc = nvme_ctrlr_get_num_queues(ctrlr);
-		break;
-
-	case NVME_CTRLR_STATE_WAIT_FOR_GET_NUM_QUEUES:
-		spdk_nvme_qpair_process_completions(ctrlr->adminq, 0);
-		break;
-
 	case NVME_CTRLR_STATE_CONSTRUCT_NS:
 		rc = nvme_ctrlr_construct_namespaces(ctrlr);
-		nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_IDENTIFY_ACTIVE_NS,
+		nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_IDENTIFY_NS,
 				     ctrlr->opts.admin_timeout_ms);
 		break;
 
@@ -2436,7 +2408,7 @@ nvme_ctrlr_process_init(struct spdk_nvme_ctrlr *ctrlr)
 		if (rc < 0) {
 			nvme_ctrlr_destruct_namespaces(ctrlr);
 		}
-		nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_IDENTIFY_NS,
+		nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_CONSTRUCT_NS,
 				     ctrlr->opts.admin_timeout_ms);
 		break;
 
@@ -2755,12 +2727,12 @@ spdk_nvme_ctrlr_get_num_ns(struct spdk_nvme_ctrlr *ctrlr)
 	return ctrlr->num_ns;
 }
 
-static int32_t
+int32_t
 spdk_nvme_ctrlr_active_ns_idx(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 {
 	int32_t result = -1;
 
-	if (ctrlr->active_ns_list == NULL || nsid == 0 || nsid > ctrlr->num_ns) {
+	if (ctrlr->active_ns_list == NULL || nsid == 0 || nsid > ctrlr->cdata.nn) {
 		return result;
 	}
 
@@ -2811,11 +2783,11 @@ spdk_nvme_ctrlr_get_next_active_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t prev_
 struct spdk_nvme_ns *
 spdk_nvme_ctrlr_get_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 {
-	if (nsid < 1 || nsid > ctrlr->num_ns) {
+	if (nsid < 1 || nsid > ctrlr->cdata.nn) {
 		return NULL;
 	}
 
-	return &ctrlr->ns[nsid - 1];
+	return &ctrlr->ns[spdk_nvme_ctrlr_active_ns_idx(ctrlr, nsid)];
 }
 
 struct spdk_pci_device *
@@ -2926,7 +2898,7 @@ spdk_nvme_ctrlr_attach_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid,
 		return res;
 	}
 
-	ns = &ctrlr->ns[nsid - 1];
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 	return nvme_ns_construct(ns, nsid, ctrlr);
 }
 
@@ -2964,7 +2936,7 @@ spdk_nvme_ctrlr_detach_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid,
 		return res;
 	}
 
-	ns = &ctrlr->ns[nsid - 1];
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 	/* Inactive NS */
 	nvme_ns_destruct(ns);
 
@@ -2999,7 +2971,7 @@ spdk_nvme_ctrlr_create_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns_dat
 	}
 
 	nsid = status->cpl.cdw0;
-	ns = &ctrlr->ns[nsid - 1];
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 	free(status);
 	/* Inactive NS */
 	res = nvme_ns_construct(ns, nsid, ctrlr);
@@ -3043,7 +3015,7 @@ spdk_nvme_ctrlr_delete_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 		return res;
 	}
 
-	ns = &ctrlr->ns[nsid - 1];
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 	nvme_ns_destruct(ns);
 
 	return 0;

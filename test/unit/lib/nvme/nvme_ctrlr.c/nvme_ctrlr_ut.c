@@ -207,13 +207,19 @@ int nvme_qpair_init(struct spdk_nvme_qpair *qpair, uint16_t id,
 	return 0;
 }
 
+static struct spdk_nvme_cpl fake_cpl = {};
+
+static void
+fake_cpl_complete(spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+{
+	cb_fn(cb_arg, &fake_cpl);
+}
+
 static void
 fake_cpl_success(spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
-	struct spdk_nvme_cpl cpl = {};
-
-	cpl.status.sc = SPDK_NVME_SC_SUCCESS;
-	cb_fn(cb_arg, &cpl);
+	fake_cpl.status.sc = SPDK_NVME_SC_SUCCESS;
+	fake_cpl_complete(cb_fn, cb_arg);
 }
 
 int
@@ -230,8 +236,8 @@ spdk_nvme_ctrlr_cmd_get_feature(struct spdk_nvme_ctrlr *ctrlr, uint8_t feature,
 				uint32_t cdw11, void *payload, uint32_t payload_size,
 				spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
-	CU_ASSERT(0);
-	return -1;
+	fake_cpl_complete(cb_fn, cb_arg);
+	return 0;
 }
 
 int
@@ -324,6 +330,9 @@ nvme_ctrlr_cmd_set_async_event_config(struct spdk_nvme_ctrlr *ctrlr,
 	return 0;
 }
 
+static uint32_t *fake_active_ns_list = NULL;
+static uint32_t fake_active_ns_list_length = 0;
+
 int
 nvme_ctrlr_cmd_identify(struct spdk_nvme_ctrlr *ctrlr, uint8_t cns, uint16_t cntid, uint32_t nsid,
 			void *payload, size_t payload_size,
@@ -334,14 +343,29 @@ nvme_ctrlr_cmd_identify(struct spdk_nvme_ctrlr *ctrlr, uint8_t cns, uint16_t cnt
 		uint32_t i = 0;
 		struct spdk_nvme_ns_list *ns_list = (struct spdk_nvme_ns_list *)payload;
 
-		for (i = 1; i <= ctrlr->num_ns; i++) {
-			if (i <= nsid) {
-				continue;
-			}
+		memset(payload, 0, payload_size);
+		if (fake_active_ns_list == NULL) {
+			for (i = 1; i <= ctrlr->num_ns; i++) {
+				if (i <= nsid) {
+					continue;
+				}
 
-			ns_list->ns_list[count++] = i;
-			if (count == SPDK_COUNTOF(ns_list->ns_list)) {
-				break;
+				ns_list->ns_list[count++] = i;
+				if (count == SPDK_COUNTOF(ns_list->ns_list)) {
+					break;
+				}
+			}
+		} else {
+			for (i = 0; i < fake_active_ns_list_length; i++) {
+				uint32_t cur_nsid = fake_active_ns_list[i];
+				if (cur_nsid <= nsid) {
+					continue;
+				}
+
+				ns_list->ns_list[count++] = cur_nsid;
+				if (count == SPDK_COUNTOF(ns_list->ns_list)) {
+					break;
+				}
 			}
 		}
 
@@ -362,8 +386,8 @@ int
 nvme_ctrlr_cmd_get_num_queues(struct spdk_nvme_ctrlr *ctrlr,
 			      spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
-	fake_cpl_success(cb_fn, cb_arg);
-	return 0;
+	CU_ASSERT(0);
+	return -1;
 }
 
 int
@@ -1802,17 +1826,16 @@ test_nvme_ctrlr_test_active_ns(void)
 		ctrlr.vs.bits.mjr = 1;
 		ctrlr.vs.bits.mnr = minor;
 		ctrlr.vs.bits.ter = 0;
-		ctrlr.num_ns = 1531;
+		ctrlr.cdata.nn = ctrlr.num_ns = 1531;
 		nvme_ctrlr_identify_active_ns(&ctrlr);
 
 		for (nsid = 1; nsid <= ctrlr.num_ns; nsid++) {
 			CU_ASSERT(spdk_nvme_ctrlr_is_active_ns(&ctrlr, nsid) == true);
 		}
-		ctrlr.num_ns = 1559;
-		for (; nsid <= ctrlr.num_ns; nsid++) {
+		for (; nsid <= 1559; nsid++) {
 			CU_ASSERT(spdk_nvme_ctrlr_is_active_ns(&ctrlr, nsid) == false);
 		}
-		ctrlr.num_ns = 1531;
+
 		for (nsid = 0; nsid < ctrlr.num_ns; nsid++) {
 			ctrlr.active_ns_list[nsid] = 0;
 		}
@@ -1860,7 +1883,7 @@ test_nvme_ctrlr_test_active_ns_error_case(void)
 	ctrlr.vs.bits.mjr = 1;
 	ctrlr.vs.bits.mnr = 2;
 	ctrlr.vs.bits.ter = 0;
-	ctrlr.num_ns = 2;
+	ctrlr.cdata.nn = ctrlr.num_ns = 2;
 
 	/* completion with error, status is freed by nvme_ctrlr_identify_active_ns */
 	set_status_cpl = 1;
@@ -1978,6 +2001,83 @@ test_spdk_nvme_ctrlr_set_trid(void)
 	CU_ASSERT(strncmp(ctrlr.trid.trsvcid, "4421", SPDK_NVMF_TRSVCID_MAX_LEN) == 0);
 }
 
+static void
+test_nvme_ctrlr_init_pure_tgt(void)
+{
+	DECLARE_AND_CONSTRUCT_CTRLR();
+
+	SPDK_CU_ASSERT_FATAL(nvme_ctrlr_construct(&ctrlr) == 0);
+	memset(&g_ut_nvme_regs, 0, sizeof(g_ut_nvme_regs));
+	ctrlr.vs.raw = SPDK_NVME_VERSION(1, 4, 0);
+
+	/*
+	 * Move controller to IDENTIFY state.
+	 */
+	g_ut_nvme_regs.cc.bits.en = 1;
+	g_ut_nvme_regs.csts.bits.rdy = 1;
+	ctrlr.page_size = 0x1000;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* INIT -> WAIT_FOR_READY_0 */
+	g_ut_nvme_regs.csts.bits.rdy = 0;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> ENABLE */
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> WAIT_FOR_READY_1 */
+	g_ut_nvme_regs.csts.bits.rdy = 1;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> ENABLE_ADMIN_QUEUE */
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> IDENTIFY */
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_IDENTIFY);
+
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> SET_NUM_QUEUES */
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_SET_NUM_QUEUES);
+
+	ctrlr.opts.num_io_queues = 64;
+	/* Num queues is zero-based. So, use 31 to get 32 queues */
+	fake_cpl.cdw0 = 31 + (31 << 16);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> IDENTIFY_ACTIVE_NS */
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_IDENTIFY_ACTIVE_NS);
+	CU_ASSERT(ctrlr.opts.num_io_queues == 32);
+	fake_cpl.cdw0 = 0;
+
+	ctrlr.cdata.nn = 0xFFFFEFFF;
+	uint32_t active_ns_list[] = { 70100, 70101, 70102, 70103 };
+	fake_active_ns_list = active_ns_list;
+	fake_active_ns_list_length = SPDK_COUNTOF(active_ns_list);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> CONSTRUCT_NS */
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_CONSTRUCT_NS);
+	CU_ASSERT(ctrlr.active_ns_list[0] == active_ns_list[0]);
+	CU_ASSERT(ctrlr.active_ns_list[1] == active_ns_list[1]);
+	CU_ASSERT(ctrlr.active_ns_list[2] == active_ns_list[2]);
+	CU_ASSERT(ctrlr.active_ns_list[3] == active_ns_list[3]);
+	fake_active_ns_list = 0;
+
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> IDENTIFY_NS */
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_IDENTIFY_NS);
+
+	while ((ctrlr.state != NVME_CTRLR_STATE_SET_KEEP_ALIVE_TIMEOUT) &&
+	       (ctrlr.state != NVME_CTRLR_STATE_ERROR)) {
+		nvme_ctrlr_process_init(&ctrlr);
+	}
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_SET_KEEP_ALIVE_TIMEOUT);
+
+	ctrlr.opts.keep_alive_timeout_ms = 120000;
+	ctrlr.cdata.kas = 10;
+	fake_cpl.status.sc = SPDK_NVME_SC_INVALID_FIELD;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0); /* -> SET_HOST_ID */
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_SET_HOST_ID);
+	CU_ASSERT(ctrlr.opts.keep_alive_timeout_ms = 120000);
+	fake_cpl.status.sc = SPDK_NVME_SC_SUCCESS;
+
+	/*
+	 * Transition to READY.
+	 */
+	while ((ctrlr.state != NVME_CTRLR_STATE_READY) &&
+	       (ctrlr.state != NVME_CTRLR_STATE_ERROR)) {
+		nvme_ctrlr_process_init(&ctrlr);
+	}
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_READY);
+
+	g_ut_nvme_regs.csts.bits.shst = SPDK_NVME_SHST_COMPLETE;
+	nvme_ctrlr_destruct(&ctrlr);
+}
+
 int main(int argc, char **argv)
 {
 	CU_pSuite	suite = NULL;
@@ -2035,6 +2135,7 @@ int main(int argc, char **argv)
 		|| CU_add_test(suite, "test_spdk_nvme_ctrlr_reconnect_io_qpair",
 			       test_spdk_nvme_ctrlr_reconnect_io_qpair) == NULL
 		|| CU_add_test(suite, "test_spdk_nvme_ctrlr_set_trid", test_spdk_nvme_ctrlr_set_trid) == NULL
+		|| CU_add_test(suite, "test nvme ctrlr init pure target", test_nvme_ctrlr_init_pure_tgt) == NULL
 	) {
 		CU_cleanup_registry();
 		return CU_get_error();
