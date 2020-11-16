@@ -715,7 +715,8 @@ nvme_ctrlr_update_ns_ana_states(const struct spdk_nvme_ana_group_descriptor *des
 			continue;
 		}
 
-		ns = &ctrlr->ns[nsid - 1];
+		ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+		assert(ns != NULL);
 
 		ns->ana_group_id = desc->ana_group_id;
 		ns->ana_state = desc->ana_state;
@@ -2497,9 +2498,10 @@ nvme_ctrlr_update_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 	bool ns_is_active;
 
 	for (i = 0; i < nn; i++) {
-		struct spdk_nvme_ns	*ns = &ctrlr->ns[i];
 		uint32_t		nsid = i + 1;
+		struct spdk_nvme_ns	*ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 
+		assert(ns != NULL);
 		nsdata = &ns->nsdata;
 		ns_is_active = spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid);
 
@@ -3745,7 +3747,8 @@ spdk_nvme_ctrlr_attach_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid,
 		return res;
 	}
 
-	ns = &ctrlr->ns[nsid - 1];
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+	assert(ns != NULL);
 	return nvme_ns_construct(ns, nsid, ctrlr);
 }
 
@@ -3783,7 +3786,8 @@ spdk_nvme_ctrlr_detach_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid,
 		return res;
 	}
 
-	ns = &ctrlr->ns[nsid - 1];
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+	assert(ns != NULL);
 	/* Inactive NS */
 	nvme_ns_destruct(ns);
 
@@ -3818,7 +3822,8 @@ spdk_nvme_ctrlr_create_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns_dat
 	}
 
 	nsid = status->cpl.cdw0;
-	ns = &ctrlr->ns[nsid - 1];
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+	assert(ns != NULL);
 	free(status);
 	/* Inactive NS */
 	res = nvme_ns_construct(ns, nsid, ctrlr);
@@ -3862,7 +3867,8 @@ spdk_nvme_ctrlr_delete_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 		return res;
 	}
 
-	ns = &ctrlr->ns[nsid - 1];
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+	assert(ns != NULL);
 	nvme_ns_destruct(ns);
 
 	return 0;
