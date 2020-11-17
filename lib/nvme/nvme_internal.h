@@ -671,9 +671,10 @@ struct spdk_nvme_ctrlr_process {
 struct spdk_nvme_ctrlr {
 	/* Hot data (accessed in I/O path) starts here. */
 
-	/** Array of namespaces indexed by nsid - 1 */
+	/** Array of active namespaces */
 	struct spdk_nvme_ns		*ns;
 
+	/** Number of active namespaces */
 	uint32_t			num_ns;
 
 	bool				is_removed;
@@ -938,6 +939,7 @@ uint32_t nvme_qpair_abort_queued_reqs(struct spdk_nvme_qpair *qpair, void *cmd_c
 void	nvme_qpair_resubmit_requests(struct spdk_nvme_qpair *qpair, uint32_t num_requests);
 
 int	nvme_ctrlr_identify_active_ns(struct spdk_nvme_ctrlr *ctrlr);
+struct spdk_nvme_ns_data *nvme_ctrlr_get_nsdata(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid);
 void	nvme_ns_set_identify_data(struct spdk_nvme_ns *ns);
 int	nvme_ns_construct(struct spdk_nvme_ns *ns, uint32_t id,
 			  struct spdk_nvme_ctrlr *ctrlr);

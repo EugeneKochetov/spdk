@@ -65,6 +65,12 @@ spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 	return -1;
 }
 
+struct spdk_nvme_ns_data *
+nvme_ctrlr_get_nsdata(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+{
+	return NULL;
+}
+
 static void
 test_nvme_ns_construct(void)
 {

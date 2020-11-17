@@ -36,7 +36,8 @@
 static inline struct spdk_nvme_ns_data *
 _nvme_ns_get_data(struct spdk_nvme_ns *ns)
 {
-	return &ns->ctrlr->nsdata[ns->id - 1];
+	/* @todo: may be store pointer to nsdata in ns */
+	return nvme_ctrlr_get_nsdata(ns->ctrlr, ns->id);
 }
 
 /**
