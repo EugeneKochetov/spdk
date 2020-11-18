@@ -92,6 +92,7 @@ static int g_master_core = 0;
 static char g_core_mask[16] = "0x1";
 
 static struct spdk_nvme_transport_id g_trid;
+static char g_hostnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
 
 static int g_controllers_found = 0;
 
@@ -1668,6 +1669,7 @@ usage(const char *program_name)
 	printf("     traddr      Transport address (e.g. 192.168.100.8)\n");
 	printf("     trsvcid     Transport service identifier (e.g. 4420)\n");
 	printf("     subnqn      Subsystem NQN (default: %s)\n", SPDK_NVMF_DISCOVERY_NQN);
+	printf("     hostnqn     Host NQN\n");
 	printf("    Example: -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.8 trsvcid:4420'\n");
 
 	spdk_log_usage(stdout, "-L");
@@ -1685,6 +1687,7 @@ static int
 parse_args(int argc, char **argv)
 {
 	int op, rc;
+	char *hostnqn;
 
 	spdk_nvme_trid_populate_transport(&g_trid, SPDK_NVME_TRANSPORT_PCIE);
 	snprintf(g_trid.subnqn, sizeof(g_trid.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
@@ -1717,6 +1720,22 @@ parse_args(int argc, char **argv)
 			if (spdk_nvme_transport_id_parse(&g_trid, optarg) != 0) {
 				fprintf(stderr, "Error parsing transport address\n");
 				return 1;
+			}
+
+			hostnqn = strcasestr(optarg, "hostnqn:");
+			if (hostnqn) {
+				size_t len;
+
+				hostnqn += strlen("hostnqn:");
+
+				len = strcspn(hostnqn, " \t\n");
+				if (len > (sizeof(g_hostnqn) - 1)) {
+					fprintf(stderr, "Host NQN is too long\n");
+					return 1;
+				}
+
+				memcpy(g_hostnqn, hostnqn, len);
+				g_hostnqn[len] = '\0';
 			}
 			break;
 		case 'x':
@@ -1756,6 +1775,7 @@ static bool
 probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	 struct spdk_nvme_ctrlr_opts *opts)
 {
+	strcpy(opts->hostnqn, g_hostnqn);
 	return true;
 }
 
@@ -1801,7 +1821,11 @@ int main(int argc, char **argv)
 
 	/* A specific trid is required. */
 	if (strlen(g_trid.traddr) != 0) {
-		ctrlr = spdk_nvme_connect(&g_trid, NULL, 0);
+		struct spdk_nvme_ctrlr_opts opts;
+
+		spdk_nvme_ctrlr_get_default_ctrlr_opts(&opts, sizeof(opts));
+		strcpy(opts.hostnqn, g_hostnqn);
+		ctrlr = spdk_nvme_connect(&g_trid, &opts, sizeof(opts));
 		if (!ctrlr) {
 			fprintf(stderr, "spdk_nvme_connect() failed\n");
 			return 1;
