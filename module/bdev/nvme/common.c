@@ -116,7 +116,7 @@ static void
 nvme_bdev_unregister_cb(void *io_device)
 {
 	struct nvme_bdev_ctrlr *nvme_bdev_ctrlr = io_device;
-	uint32_t i;
+	struct nvme_bdev_ns *ns;
 
 	pthread_mutex_lock(&g_bdev_nvme_mutex);
 	TAILQ_REMOVE(&g_nvme_bdev_ctrlrs, nvme_bdev_ctrlr, tailq);
@@ -124,10 +124,10 @@ nvme_bdev_unregister_cb(void *io_device)
 	spdk_nvme_detach(nvme_bdev_ctrlr->ctrlr);
 	spdk_poller_unregister(&nvme_bdev_ctrlr->adminq_timer_poller);
 	free(nvme_bdev_ctrlr->name);
-	for (i = 0; i < nvme_bdev_ctrlr->num_ns; i++) {
-		free(nvme_bdev_ctrlr->namespaces[i]);
+	while ((ns = STAILQ_FIRST(&nvme_bdev_ctrlr->namespaces))) {
+		STAILQ_REMOVE_HEAD(&nvme_bdev_ctrlr->namespaces, link);
+		free(ns);
 	}
-	free(nvme_bdev_ctrlr->namespaces);
 	free(nvme_bdev_ctrlr->trid);
 	free(nvme_bdev_ctrlr);
 
@@ -174,6 +174,20 @@ nvme_bdev_ctrlr_destruct(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr)
 
 	spdk_io_device_unregister(nvme_bdev_ctrlr, nvme_bdev_unregister_cb);
 	return SPDK_POLLER_BUSY;
+}
+
+struct nvme_bdev_ns *
+nvme_bdev_ctrlr_get_ns(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr, uint32_t nsid)
+{
+	struct nvme_bdev_ns *ns;
+
+	STAILQ_FOREACH(ns, &nvme_bdev_ctrlr->namespaces, link) {
+		if (ns->id == nsid) {
+			return ns;
+		}
+	}
+
+	return NULL;
 }
 
 void

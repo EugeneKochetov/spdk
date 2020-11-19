@@ -36,6 +36,7 @@
 #include "vbdev_opal.h"
 #include "spdk_internal/log.h"
 #include "spdk/string.h"
+#include "common.h"
 
 /* OPAL locking range only supports operations on nsid=1 for now */
 #define NSID_SUPPORTED		1
@@ -326,6 +327,7 @@ vbdev_opal_create(const char *nvme_ctrlr_name, uint32_t nsid, uint8_t locking_ra
 	struct vbdev_opal_part_base *opal_part_base = NULL;
 	struct spdk_bdev_part *part_bdev;
 	struct nvme_bdev *nvme_bdev;
+	struct nvme_bdev_ns *ns;
 
 	if (nsid != NSID_SUPPORTED) {
 		SPDK_ERRLOG("nsid %d not supported", nsid);
@@ -343,6 +345,12 @@ vbdev_opal_create(const char *nvme_ctrlr_name, uint32_t nsid, uint8_t locking_ra
 		return -ENOTSUP;
 	}
 
+	ns = nvme_bdev_ctrlr_get_ns(nvme_ctrlr, nsid);
+	if (!ns) {
+		SPDK_ERRLOG("NVMe namespace not found: nsid %u\n", nsid);
+		return -EINVAL;
+	}
+
 	opal_bdev = calloc(1, sizeof(struct opal_vbdev));
 	if (!opal_bdev) {
 		SPDK_ERRLOG("allocation for opal_bdev failed\n");
@@ -356,7 +364,7 @@ vbdev_opal_create(const char *nvme_ctrlr_name, uint32_t nsid, uint8_t locking_ra
 	opal_bdev->nvme_ctrlr = nvme_ctrlr;
 	opal_bdev->opal_dev = nvme_ctrlr->opal_dev;
 
-	nvme_bdev = TAILQ_FIRST(&nvme_ctrlr->namespaces[nsid - 1]->bdevs);
+	nvme_bdev = TAILQ_FIRST(&ns->bdevs);
 	assert(nvme_bdev != NULL);
 	base_bdev_name = nvme_bdev->disk.name;
 

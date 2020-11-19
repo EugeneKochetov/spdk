@@ -65,6 +65,7 @@ struct nvme_bdev_ns {
 	struct nvme_bdev_ctrlr	*ctrlr;
 	TAILQ_HEAD(, nvme_bdev)	bdevs;
 	void			*type_ctx;
+	STAILQ_ENTRY(nvme_bdev_ns) link;
 };
 
 struct ocssd_bdev_ctrlr;
@@ -87,9 +88,7 @@ struct nvme_bdev_ctrlr {
 	 * NVMe controllers are not included.
 	 */
 	uint32_t			prchk_flags;
-	uint32_t			num_ns;
-	/** Array of pointers to namespaces indexed by nsid - 1 */
-	struct nvme_bdev_ns		**namespaces;
+	STAILQ_HEAD(, nvme_bdev_ns)	namespaces;
 
 	struct spdk_opal_dev		*opal_dev;
 
@@ -157,6 +156,7 @@ void nvme_bdev_dump_trid_json(struct spdk_nvme_transport_id *trid,
 			      struct spdk_json_write_ctx *w);
 
 int nvme_bdev_ctrlr_destruct(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr);
+struct nvme_bdev_ns *nvme_bdev_ctrlr_get_ns(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr, uint32_t nsid);
 void nvme_bdev_attach_bdev_to_ns(struct nvme_bdev_ns *nvme_ns, struct nvme_bdev *nvme_disk);
 void nvme_bdev_detach_bdev_from_ns(struct nvme_bdev *nvme_disk);
 

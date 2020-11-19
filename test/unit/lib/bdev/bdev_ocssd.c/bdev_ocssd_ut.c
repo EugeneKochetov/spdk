@@ -208,28 +208,28 @@ create_nvme_bdev_controller(const struct spdk_nvme_transport_id *trid, const cha
 	nvme_bdev_ctrlr = calloc(1, sizeof(*nvme_bdev_ctrlr));
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr != NULL);
 
-	nvme_bdev_ctrlr->namespaces = calloc(ctrlr->ns_count, sizeof(struct nvme_bdev_ns *));
-	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr->namespaces != NULL);
+	STAILQ_INIT(&nvme_bdev_ctrlr->namespaces);
 
 	nvme_bdev_ctrlr->trid = calloc(1, sizeof(struct spdk_nvme_transport_id));
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr->trid != NULL);
 
 	nvme_bdev_ctrlr->ctrlr = ctrlr;
-	nvme_bdev_ctrlr->num_ns = ctrlr->ns_count;
 	nvme_bdev_ctrlr->ref = 0;
 	*nvme_bdev_ctrlr->trid = *trid;
 	nvme_bdev_ctrlr->name = strdup(name);
 
 	for (nsid = 0; nsid < ctrlr->ns_count; ++nsid) {
-		nvme_bdev_ctrlr->namespaces[nsid] = calloc(1, sizeof(struct nvme_bdev_ns));
-		SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr->namespaces[nsid] != NULL);
+		struct nvme_bdev_ns *ns;
+		ns = calloc(1, sizeof(struct nvme_bdev_ns));
+		SPDK_CU_ASSERT_FATAL(ns != NULL);
 
-		nvme_bdev_ctrlr->namespaces[nsid]->id = nsid + 1;
-		nvme_bdev_ctrlr->namespaces[nsid]->ctrlr = nvme_bdev_ctrlr;
-		nvme_bdev_ctrlr->namespaces[nsid]->type = NVME_BDEV_NS_OCSSD;
-		TAILQ_INIT(&nvme_bdev_ctrlr->namespaces[nsid]->bdevs);
+		ns->id = nsid + 1;
+		ns->ctrlr = nvme_bdev_ctrlr;
+		ns->type = NVME_BDEV_NS_OCSSD;
+		TAILQ_INIT(&ns->bdevs);
+		STAILQ_INSERT_TAIL(&nvme_bdev_ctrlr->namespaces, ns, link);
 
-		bdev_ocssd_populate_namespace(nvme_bdev_ctrlr, nvme_bdev_ctrlr->namespaces[nsid], NULL);
+		bdev_ocssd_populate_namespace(nvme_bdev_ctrlr, ns, NULL);
 	}
 
 	while (spdk_thread_poll(g_thread, 0, 0) > 0) {}
@@ -513,13 +513,10 @@ delete_nvme_bdev_controller(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr)
 	struct nvme_bdev *nvme_bdev, *tmp;
 	struct nvme_bdev_ns *nvme_ns;
 	bool empty = true;
-	uint32_t nsid;
 
 	nvme_bdev_ctrlr->destruct = true;
 
-	for (nsid = 0; nsid < nvme_bdev_ctrlr->num_ns; ++nsid) {
-		nvme_ns = nvme_bdev_ctrlr->namespaces[nsid];
-
+	while ((nvme_ns = STAILQ_FIRST(&nvme_bdev_ctrlr->namespaces))) {
 		if (!TAILQ_EMPTY(&nvme_ns->bdevs)) {
 			TAILQ_FOREACH_SAFE(nvme_bdev, &nvme_ns->bdevs, tailq, tmp) {
 				spdk_bdev_unregister(&nvme_bdev->disk, NULL, NULL);
@@ -528,7 +525,9 @@ delete_nvme_bdev_controller(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr)
 			empty = false;
 		}
 
-		bdev_ocssd_depopulate_namespace(nvme_bdev_ctrlr->namespaces[nsid]);
+		bdev_ocssd_depopulate_namespace(nvme_ns);
+		STAILQ_REMOVE_HEAD(&nvme_bdev_ctrlr->namespaces, link);
+		free(nvme_ns);
 	}
 
 	if (empty) {
