@@ -1763,7 +1763,6 @@ typedef void (*nvme_active_ns_ctx_deleter)(struct nvme_active_ns_ctx *);
 struct nvme_active_ns_ctx {
 	struct spdk_nvme_ctrlr *ctrlr;
 	uint32_t page;
-	uint32_t num_pages;
 	uint32_t next_nsid;
 	uint32_t *new_ns_list;
 	nvme_active_ns_ctx_deleter deleter;
@@ -1775,7 +1774,6 @@ static struct nvme_active_ns_ctx *
 nvme_active_ns_ctx_create(struct spdk_nvme_ctrlr *ctrlr, nvme_active_ns_ctx_deleter deleter)
 {
 	struct nvme_active_ns_ctx *ctx;
-	uint32_t num_pages = 0;
 	uint32_t *new_ns_list = NULL;
 
 	ctx = calloc(1, sizeof(*ctx));
@@ -1784,19 +1782,14 @@ nvme_active_ns_ctx_create(struct spdk_nvme_ctrlr *ctrlr, nvme_active_ns_ctx_dele
 		return NULL;
 	}
 
-	if (ctrlr->num_ns) {
-		/* The allocated size must be a multiple of sizeof(struct spdk_nvme_ns_list) */
-		num_pages = (ctrlr->num_ns * sizeof(new_ns_list[0]) - 1) / sizeof(struct spdk_nvme_ns_list) + 1;
-		new_ns_list = spdk_zmalloc(num_pages * sizeof(struct spdk_nvme_ns_list), ctrlr->page_size,
-					   NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA | SPDK_MALLOC_SHARE);
-		if (!new_ns_list) {
-			SPDK_ERRLOG("Failed to allocate active_ns_list!\n");
-			free(ctx);
-			return NULL;
-		}
+	new_ns_list = spdk_zmalloc(sizeof(struct spdk_nvme_ns_list), ctrlr->page_size,
+				   NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_SHARE);
+	if (!new_ns_list) {
+		SPDK_ERRLOG("Failed to allocate active_ns_list!\n");
+		free(ctx);
+		return NULL;
 	}
 
-	ctx->num_pages = num_pages;
 	ctx->new_ns_list = new_ns_list;
 	ctx->ctrlr = ctrlr;
 	ctx->deleter = deleter;
@@ -1814,8 +1807,12 @@ nvme_active_ns_ctx_destroy(struct nvme_active_ns_ctx *ctx)
 static void
 nvme_ctrlr_identify_active_ns_swap(struct spdk_nvme_ctrlr *ctrlr, uint32_t **new_ns_list)
 {
+	uint32_t max_active_ns_idx = 0;
+
+	while ((*new_ns_list)[max_active_ns_idx++]);
 	spdk_free(ctrlr->active_ns_list);
 	ctrlr->active_ns_list = *new_ns_list;
+	ctrlr->max_active_ns_idx = max_active_ns_idx;
 	*new_ns_list = NULL;
 }
 
@@ -1823,6 +1820,7 @@ static void
 nvme_ctrlr_identify_active_ns_async_done(void *arg, const struct spdk_nvme_cpl *cpl)
 {
 	struct nvme_active_ns_ctx *ctx = arg;
+	uint32_t *new_ns_list = NULL;
 
 	if (spdk_nvme_cpl_is_error(cpl)) {
 		ctx->state = NVME_ACTIVE_NS_STATE_ERROR;
@@ -1830,11 +1828,22 @@ nvme_ctrlr_identify_active_ns_async_done(void *arg, const struct spdk_nvme_cpl *
 	}
 
 	ctx->next_nsid = ctx->new_ns_list[1024 * ctx->page + 1023];
-	if (ctx->next_nsid == 0 || ++ctx->page == ctx->num_pages) {
+	if (ctx->next_nsid == 0) {
 		ctx->state = NVME_ACTIVE_NS_STATE_DONE;
 		goto out;
 	}
 
+	ctx->page++;
+	new_ns_list = spdk_realloc(ctx->new_ns_list,
+				   (ctx->page + 1) * sizeof(struct spdk_nvme_ns_list),
+				   ctx->ctrlr->page_size);
+	if (!new_ns_list) {
+		SPDK_ERRLOG("Failed to reallocate active_ns_list!\n");
+		ctx->state = NVME_ACTIVE_NS_STATE_ERROR;
+		goto out;
+	}
+
+	ctx->new_ns_list = new_ns_list;
 	nvme_ctrlr_identify_active_ns_async(ctx);
 	return;
 
@@ -1851,7 +1860,7 @@ nvme_ctrlr_identify_active_ns_async(struct nvme_active_ns_ctx *ctx)
 	uint32_t i;
 	int rc;
 
-	if (ctrlr->num_ns == 0) {
+	if (ctrlr->cdata.nn == 0) {
 		ctx->state = NVME_ACTIVE_NS_STATE_DONE;
 		goto out;
 	}
@@ -1861,7 +1870,27 @@ nvme_ctrlr_identify_active_ns_async(struct nvme_active_ns_ctx *ctx)
 	 * an active ns list, i.e. all namespaces report as active
 	 */
 	if (ctrlr->vs.raw < SPDK_NVME_VERSION(1, 1, 0) || ctrlr->quirks & NVME_QUIRK_IDENTIFY_CNS) {
-		for (i = 0; i < ctrlr->num_ns; i++) {
+		uint32_t *new_ns_list;
+		uint32_t num_pages;
+
+		/*
+		 * Active NS list must always end with zero element.
+		 * So, we allocate for cdata.nn+1.
+		 */
+		num_pages = ((ctrlr->cdata.nn + 1) * sizeof(new_ns_list[0]) - 1) /
+			    sizeof(struct spdk_nvme_ns_list) + 1;
+		new_ns_list = spdk_realloc(ctx->new_ns_list,
+					   num_pages * sizeof(struct spdk_nvme_ns_list),
+					   ctx->ctrlr->page_size);
+		if (!new_ns_list) {
+			SPDK_ERRLOG("Failed to reallocate active_ns_list!\n");
+			ctx->state = NVME_ACTIVE_NS_STATE_ERROR;
+			goto out;
+		}
+
+		ctx->new_ns_list = new_ns_list;
+		ctx->new_ns_list[ctrlr->cdata.nn] = 0;
+		for (i = 0; i < ctrlr->cdata.nn; i++) {
 			ctx->new_ns_list[i] = i + 1;
 		}
 
@@ -2461,6 +2490,7 @@ nvme_ctrlr_destruct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 
 	spdk_free(ctrlr->active_ns_list);
 	ctrlr->active_ns_list = NULL;
+	ctrlr->max_active_ns_idx = 0;
 }
 
 static void
@@ -3545,12 +3575,12 @@ nvme_ctrlr_active_ns_idx(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 {
 	int32_t result = -1;
 
-	if (ctrlr->active_ns_list == NULL || nsid == 0 || nsid > ctrlr->num_ns) {
+	if (ctrlr->active_ns_list == NULL || nsid == 0 || nsid > ctrlr->cdata.nn) {
 		return result;
 	}
 
 	int32_t lower = 0;
-	int32_t upper = ctrlr->num_ns - 1;
+	int32_t upper = ctrlr->max_active_ns_idx;
 	int32_t mid;
 
 	while (lower <= upper) {
@@ -3587,7 +3617,7 @@ uint32_t
 spdk_nvme_ctrlr_get_next_active_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t prev_nsid)
 {
 	int32_t nsid_idx = nvme_ctrlr_active_ns_idx(ctrlr, prev_nsid);
-	if (ctrlr->active_ns_list && nsid_idx >= 0 && (uint32_t)nsid_idx < ctrlr->num_ns - 1) {
+	if (ctrlr->active_ns_list && nsid_idx >= 0 && (uint32_t)nsid_idx < ctrlr->max_active_ns_idx) {
 		return ctrlr->active_ns_list[nsid_idx + 1];
 	}
 	return 0;
