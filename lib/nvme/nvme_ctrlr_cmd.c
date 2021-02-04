@@ -95,9 +95,10 @@ spdk_nvme_ctrlr_cmd_io_raw_with_md(struct spdk_nvme_ctrlr *ctrlr,
 	if (md_buf) {
 		struct spdk_nvme_ns *ns = spdk_nvme_ctrlr_get_ns(ctrlr, cmd->nsid);
 
-		assert(ns != NULL);
-		assert(ns->sector_size != 0);
-		md_len =  len / ns->sector_size * ns->md_size;
+		if (ns) {
+			assert(ns->sector_size != 0);
+			md_len =  len / ns->sector_size * ns->md_size;
+		}
 	}
 
 	req = nvme_allocate_request(qpair, &payload, len, md_len, cb_fn, cb_arg);

@@ -2,7 +2,7 @@
  *   BSD LICENSE
  *
  *   Copyright (c) Intel Corporation. All rights reserved.
- *   Copyright (c) 2019, 2020 Mellanox Technologies LTD. All rights reserved.
+ *   Copyright (c) 2019-2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -256,6 +256,23 @@ struct spdk_nvme_ctrlr_opts {
 	 * this controller in microseconds.
 	 */
 	uint64_t fabrics_connect_timeout_us;
+
+	/**
+	 * Minimum number of namespaces on controller (cdata.nn) to
+	 * use dynamic namespace allocation.
+	 *
+	 * If threshold is zero or number of namespaces is less than
+	 * threshold, static allocation will be used. If number of
+	 * namespaces is greater or equal to threshold, then dynamic
+	 * namespace allocation will be used.
+	 *
+	 * Dynamic namespace allocation affects behavior of namespace
+	 * related APIs. See description of spdk_nvme_ctrlr_get_ns()
+	 * function.
+	 *
+	 * Default: 0
+	 */
+	uint32_t dynamic_ns_threshold;
 };
 
 /**
@@ -1623,13 +1640,27 @@ struct spdk_nvme_ns;
  * never be any gaps in the numbering. The number of namespaces is obtained by
  * calling spdk_nvme_ctrlr_get_num_ns().
  *
+ * Pointer returned by this function will be invalidated by
+ * spdk_nvme_ctrlr_reset() and spdk_nvme_ctrlr_reset_subsystem()
+ * functions and shall not be used after that.
+ *
+ * With static namespace allocation this function will always return
+ * non-NULL pointer for any valid namespace ID. With dynamic namespace
+ * allocation it may return NULL for valid but inactive namespaces ID.
+ *
+ * With dynamic namespace allocation this function has O(N) complexity
+ * (where N is number of active namespaces) and shall be avoided in
+ * performance critical sections. It is recommended for applications
+ * to save the namespace handle and use it in fast path.
+ *
  * This function is thread safe and can be called at any point while the controller
  * is attached to the SPDK NVMe driver.
  *
  * \param ctrlr Opaque handle to NVMe controller.
  * \param ns_id Namespace id.
  *
- * \return a pointer to the namespace.
+ * \return a pointer to the namespace or NULL if namespace ID is
+ * invalid or namespace is inactive and not allocated.
  */
 struct spdk_nvme_ns *spdk_nvme_ctrlr_get_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t ns_id);
 

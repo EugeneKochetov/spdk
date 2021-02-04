@@ -500,6 +500,8 @@ struct spdk_nvme_ns {
 
 	/* Zoned Namespace Command Set Specific Identify Namespace data. */
 	struct spdk_nvme_zns_ns_data	*nsdata_zns;
+
+	STAILQ_ENTRY(spdk_nvme_ns)	link;
 };
 
 /**
@@ -725,14 +727,29 @@ struct spdk_nvme_ctrlr_process {
 	uint64_t			timeout_ticks;
 };
 
+struct spdk_nvme_ctrlr_ns_ops {
+	void (*init_namespaces)(struct spdk_nvme_ctrlr *);
+	int (*construct_namespaces)(struct spdk_nvme_ctrlr *);
+	void (*destruct_namespaces)(struct spdk_nvme_ctrlr *);
+	void (*update_namespaces)(struct spdk_nvme_ctrlr *);
+	struct spdk_nvme_ns * (*construct_namespace)(struct spdk_nvme_ctrlr *, uint32_t);
+	struct spdk_nvme_ns *(*get_ns)(struct spdk_nvme_ctrlr *, uint32_t);
+};
+
 /*
  * One of these per allocated PCI device.
  */
 struct spdk_nvme_ctrlr {
 	/* Hot data (accessed in I/O path) starts here. */
 
-	/** Array of namespaces indexed by nsid - 1 */
-	struct spdk_nvme_ns		*ns;
+	union {
+		/** Array of namespaces indexed by nsid - 1 */
+		struct spdk_nvme_ns		*ns;
+		/** List of active namespaces sorted by nsid */
+		STAILQ_HEAD(, spdk_nvme_ns)	ns_list;
+	};
+
+	struct spdk_nvme_ctrlr_ns_ops	*ns_ops;
 
 	uint32_t			num_ns;
 

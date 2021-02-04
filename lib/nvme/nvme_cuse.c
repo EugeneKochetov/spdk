@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -301,17 +301,24 @@ cuse_nvme_submit_io_write_cb(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, void 
 	struct cuse_io_ctx *ctx = arg;
 	struct spdk_nvme_ns *ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 
+	if (spdk_unlikely(!ns)) {
+		rc = -ENODEV;
+		goto err;
+	}
+
 	rc = spdk_nvme_ns_cmd_write(ns, ctrlr->external_io_msgs_qpair, ctx->data,
 				    ctx->lba, /* LBA start */
 				    ctx->lba_count, /* number of LBAs */
 				    cuse_nvme_submit_io_write_done, ctx, 0);
-
 	if (rc != 0) {
-		SPDK_ERRLOG("write failed: rc = %d\n", rc);
-		fuse_reply_err(ctx->req, rc);
-		cuse_io_ctx_free(ctx);
-		return;
+		goto err;
 	}
+
+	return;
+ err:
+	SPDK_ERRLOG("write failed: rc = %d\n", rc);
+	fuse_reply_err(ctx->req, rc);
+	cuse_io_ctx_free(ctx);
 }
 
 static void
@@ -376,17 +383,24 @@ cuse_nvme_submit_io_read_cb(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, void *
 	struct cuse_io_ctx *ctx = arg;
 	struct spdk_nvme_ns *ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 
+	if (spdk_unlikely(!ns)) {
+		rc = -ENODEV;
+		goto err;
+	}
+
 	rc = spdk_nvme_ns_cmd_read(ns, ctrlr->external_io_msgs_qpair, ctx->data,
 				   ctx->lba, /* LBA start */
 				   ctx->lba_count, /* number of LBAs */
 				   cuse_nvme_submit_io_read_done, ctx, 0);
-
 	if (rc != 0) {
-		SPDK_ERRLOG("read failed: rc = %d\n", rc);
-		fuse_reply_err(ctx->req, rc);
-		cuse_io_ctx_free(ctx);
-		return;
+		goto err;
 	}
+
+	return;
+ err:
+	SPDK_ERRLOG("read failed: rc = %d\n", rc);
+	fuse_reply_err(ctx->req, rc);
+	cuse_io_ctx_free(ctx);
 }
 
 static void
@@ -449,6 +463,12 @@ cuse_nvme_submit_io(fuse_req_t req, int cmd, void *arg,
 	user_io = in_buf;
 
 	ns = spdk_nvme_ctrlr_get_ns(cuse_device->ctrlr, cuse_device->nsid);
+	if (spdk_unlikely(!ns)) {
+		SPDK_ERRLOG("SUBMIT_IO: nsid:%u not found\n", cuse_device->nsid);
+		fuse_reply_err(req, ENODEV);
+		return;
+	}
+
 	block_size = spdk_nvme_ns_get_sector_size(ns);
 
 	switch (user_io->opcode) {
@@ -497,6 +517,12 @@ cuse_blkgetsize64(fuse_req_t req, int cmd, void *arg,
 	FUSE_REPLY_CHECK_BUFFER(req, arg, out_bufsz, size);
 
 	ns = spdk_nvme_ctrlr_get_ns(cuse_device->ctrlr, cuse_device->nsid);
+	if (spdk_unlikely(!ns)) {
+		SPDK_ERRLOG("blkgetsize64: nsid:%u not found\n", cuse_device->nsid);
+		fuse_reply_err(req, ENODEV);
+		return;
+	}
+
 	size = spdk_nvme_ns_get_num_sectors(ns);
 	fuse_reply_ioctl(req, 0, &size, sizeof(size));
 }
@@ -513,6 +539,12 @@ cuse_blkpbszget(fuse_req_t req, int cmd, void *arg,
 	FUSE_REPLY_CHECK_BUFFER(req, arg, out_bufsz, pbsz);
 
 	ns = spdk_nvme_ctrlr_get_ns(cuse_device->ctrlr, cuse_device->nsid);
+	if (spdk_unlikely(!ns)) {
+		SPDK_ERRLOG("blkpbszget: nsid:%u not found\n", cuse_device->nsid);
+		fuse_reply_err(req, ENODEV);
+		return;
+	}
+
 	pbsz = spdk_nvme_ns_get_sector_size(ns);
 	fuse_reply_ioctl(req, 0, &pbsz, sizeof(pbsz));
 }
@@ -529,6 +561,11 @@ cuse_blkgetsize(fuse_req_t req, int cmd, void *arg,
 	FUSE_REPLY_CHECK_BUFFER(req, arg, out_bufsz, size);
 
 	ns = spdk_nvme_ctrlr_get_ns(cuse_device->ctrlr, cuse_device->nsid);
+	if (spdk_unlikely(!ns)) {
+		SPDK_ERRLOG("blkgetsize: nsid:%u not found\n", cuse_device->nsid);
+		fuse_reply_err(req, ENODEV);
+		return;
+	}
 
 	/* return size in 512 bytes blocks */
 	size = spdk_nvme_ns_get_num_sectors(ns) * 512 / spdk_nvme_ns_get_sector_size(ns);

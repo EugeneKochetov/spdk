@@ -24,6 +24,15 @@ independent SPDK processes are running on one node.  The filter function can
 then be implemented in these processes to decide which SSDs to probe based on
 the new SSD's PCI address.
 
+Added dynamic namespace allocation feature. It allows to save memory
+by not allocating inactive namespaces. This feature affects the
+behavior of `spdk_nvme_ctrlr_get_ns` function. With dynamic namespace
+allocation enabled it may return NULL pointer for valid but inactive
+namespace IDs. Also dynamic version of `spdk_nvme_ctrlr_get_ns` has
+higher complexity and shall be avoided in data path. Dynamic namespace
+allocation feature is controlled by `dynamic_ns_threshold` controller
+option and is disabled by default to keep backward compatibility.
+
 ## v21.01:
 
 ### idxd

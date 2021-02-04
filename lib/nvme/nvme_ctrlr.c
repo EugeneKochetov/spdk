@@ -40,8 +40,12 @@
 #include "spdk/string.h"
 
 struct nvme_active_ns_ctx;
+static struct spdk_nvme_ctrlr_ns_ops ns_ops_static;
+static struct spdk_nvme_ctrlr_ns_ops ns_ops_dynamic;
 
 static void nvme_ctrlr_destruct_namespaces(struct spdk_nvme_ctrlr *ctrlr);
+static struct spdk_nvme_ns *nvme_ctrlr_construct_namespace(struct spdk_nvme_ctrlr *ctrlr,
+							   uint32_t nsid);
 static int nvme_ctrlr_construct_and_submit_aer(struct spdk_nvme_ctrlr *ctrlr,
 		struct nvme_async_event_request *aer);
 static void nvme_ctrlr_identify_active_ns_async(struct nvme_active_ns_ctx *ctx);
@@ -181,6 +185,7 @@ spdk_nvme_ctrlr_get_default_ctrlr_opts(struct spdk_nvme_ctrlr_opts *opts, size_t
 	SET_FIELD(transport_ack_timeout, SPDK_NVME_DEFAULT_TRANSPORT_ACK_TIMEOUT);
 	SET_FIELD(admin_queue_size, DEFAULT_ADMIN_QUEUE_SIZE);
 	SET_FIELD(fabrics_connect_timeout_us, NVME_FABRIC_CONNECT_COMMAND_TIMEOUT);
+	SET_FIELD(dynamic_ns_threshold, 0);
 
 #undef FIELD_OK
 #undef SET_FIELD
@@ -1591,6 +1596,22 @@ nvme_ctrlr_identify_done(void *arg, const struct spdk_nvme_cpl *cpl)
 		ctrlr->flags |= SPDK_NVME_CTRLR_COMPARE_AND_WRITE_SUPPORTED;
 	}
 
+	/*
+	 * Set namespace ops and init only if we didn't have any
+	 * namespaces before. After reset we already have allocated
+	 * namespaces and we can't change allocation method.
+	 */
+	if (ctrlr->num_ns == 0) {
+		if (ctrlr->opts.dynamic_ns_threshold &&
+		    ctrlr->cdata.nn >= ctrlr->opts.dynamic_ns_threshold) {
+			ctrlr->ns_ops = &ns_ops_dynamic;
+		} else {
+			ctrlr->ns_ops = &ns_ops_static;
+		}
+
+		ctrlr->ns_ops->init_namespaces(ctrlr);
+	}
+
 	nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_IDENTIFY_IOCS_SPECIFIC,
 			     ctrlr->opts.admin_timeout_ms);
 }
@@ -2475,7 +2496,7 @@ nvme_ctrlr_set_host_id(struct spdk_nvme_ctrlr *ctrlr)
 }
 
 static void
-nvme_ctrlr_destruct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
+nvme_ctrlr_destruct_namespaces_static(struct spdk_nvme_ctrlr *ctrlr)
 {
 	if (ctrlr->ns) {
 		uint32_t i, num_ns = ctrlr->num_ns;
@@ -2491,7 +2512,7 @@ nvme_ctrlr_destruct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 }
 
 static void
-nvme_ctrlr_update_namespaces(struct spdk_nvme_ctrlr *ctrlr)
+nvme_ctrlr_update_namespaces_static(struct spdk_nvme_ctrlr *ctrlr)
 {
 	uint32_t i, nn = ctrlr->cdata.nn;
 	struct spdk_nvme_ns_data *nsdata;
@@ -2528,7 +2549,7 @@ nvme_ctrlr_update_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 }
 
 static int
-nvme_ctrlr_construct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
+nvme_ctrlr_construct_namespaces_static(struct spdk_nvme_ctrlr *ctrlr)
 {
 	int rc = 0;
 	uint32_t i, nn = ctrlr->cdata.nn;
@@ -2567,6 +2588,186 @@ nvme_ctrlr_construct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 fail:
 	nvme_ctrlr_destruct_namespaces(ctrlr);
 	return rc;
+}
+
+static struct spdk_nvme_ns *
+nvme_ctrlr_construct_namespace_static(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+{
+	assert(nsid < ctrlr->num_ns);
+	return &ctrlr->ns[nsid - 1];
+}
+
+static void
+nvme_ctrlr_destruct_namespaces_dynamic(struct spdk_nvme_ctrlr *ctrlr)
+{
+	struct spdk_nvme_ns *ns;
+
+	while ((ns = STAILQ_FIRST(&ctrlr->ns_list)) != NULL) {
+		nvme_ns_destruct(ns);
+		STAILQ_REMOVE_HEAD(&ctrlr->ns_list, link);
+		SPDK_DEBUGLOG(nvme, "Deallocated NS %u\n", ns->id);
+		spdk_free(ns);
+	}
+
+	ctrlr->num_ns = 0;
+}
+
+static void
+nvme_ctrlr_insert_ns_dynamic(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
+{
+	struct spdk_nvme_ns *next_ns;
+	struct spdk_nvme_ns *prev_ns = NULL;
+
+	nvme_robust_mutex_lock(&ctrlr->ctrlr_lock);
+	STAILQ_FOREACH(next_ns, &ctrlr->ns_list, link) {
+		assert(next_ns->id != ns->id);
+		if (next_ns->id > ns->id) {
+			if (prev_ns) {
+				STAILQ_INSERT_AFTER(&ctrlr->ns_list, prev_ns, ns, link);
+			} else {
+				STAILQ_INSERT_HEAD(&ctrlr->ns_list, ns, link);
+			}
+			nvme_robust_mutex_unlock(&ctrlr->ctrlr_lock);
+			return;
+		}
+		prev_ns = next_ns;
+	}
+
+	STAILQ_INSERT_TAIL(&ctrlr->ns_list, ns, link);
+	nvme_robust_mutex_unlock(&ctrlr->ctrlr_lock);
+}
+
+static void
+nvme_ctrlr_update_namespaces_dynamic(struct spdk_nvme_ctrlr *ctrlr)
+{
+	struct spdk_nvme_ns *ns, *tmp;
+	int rc;
+
+	/* Check for removed or updated namespaces */
+	nvme_robust_mutex_lock(&ctrlr->ctrlr_lock);
+	STAILQ_FOREACH_SAFE(ns, &ctrlr->ns_list, link, tmp) {
+		if (spdk_nvme_ctrlr_is_active_ns(ctrlr, ns->id)) {
+			SPDK_DEBUGLOG(nvme, "Namespace %u was updated\n", ns->id);
+			if (nvme_ns_update(ns) != 0) {
+				SPDK_ERRLOG("Failed to update active NS %u\n", ns->id);
+				continue;
+			}
+		} else {
+			SPDK_DEBUGLOG(nvme, "Namespace %u was removed\n", ns->id);
+			nvme_ns_destruct(ns);
+		}
+	}
+
+	/* Check for new namespaces */
+	for (uint32_t nsid = spdk_nvme_ctrlr_get_first_active_ns(ctrlr);
+	     nsid != 0;
+	     nsid = spdk_nvme_ctrlr_get_next_active_ns(ctrlr, nsid)) {
+		ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+		/* Search for unallocated or previously inactive namespaces */
+		if (ns && ns->nsdata.ncap != 0) {
+			continue;
+		}
+
+		SPDK_DEBUGLOG(nvme, "Namespace %u was added\n", nsid);
+		if (!ns) {
+			ns = nvme_ctrlr_construct_namespace(ctrlr, nsid);
+			if (!ns) {
+				SPDK_ERRLOG("Failed to allocate new NS %u\n", nsid);
+				continue;
+			}
+		}
+
+		rc = nvme_ns_construct(ns, nsid, ctrlr);
+		if (rc != 0) {
+			SPDK_ERRLOG("Failed to construct new namespace %u, err %d\n", nsid, rc);
+			continue;
+		}
+	}
+
+	nvme_robust_mutex_unlock(&ctrlr->ctrlr_lock);
+}
+
+static int
+nvme_ctrlr_construct_namespaces_dynamic(struct spdk_nvme_ctrlr *ctrlr)
+{
+	int rc = 0;
+
+	nvme_ctrlr_destruct_namespaces(ctrlr);
+	for (uint32_t nsid = spdk_nvme_ctrlr_get_first_active_ns(ctrlr);
+	     nsid != 0;
+	     nsid = spdk_nvme_ctrlr_get_next_active_ns(ctrlr, nsid)) {
+		struct spdk_nvme_ns *ns;
+
+		ns = spdk_zmalloc(sizeof(struct spdk_nvme_ns), 64, NULL,
+				  SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);
+		if (!ns) {
+			rc = -ENOMEM;
+			goto fail;
+		}
+
+		ns->id = nsid;
+		ns->ctrlr = ctrlr;
+		STAILQ_INSERT_TAIL(&ctrlr->ns_list, ns, link);
+		SPDK_DEBUGLOG(nvme, "Allocated NS %u\n", nsid);
+	}
+
+	ctrlr->num_ns = ctrlr->cdata.nn;
+
+	return rc;
+
+ fail:
+	nvme_ctrlr_destruct_namespaces(ctrlr);
+	return rc;
+}
+
+static struct spdk_nvme_ns *
+nvme_ctrlr_construct_namespace_dynamic(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+{
+	struct spdk_nvme_ns *ns;
+
+	ns = spdk_zmalloc(sizeof(struct spdk_nvme_ns), 64, NULL,
+			  SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);
+	if (!ns) {
+		SPDK_ERRLOG("Failed to allocate memory for NS %u\n", nsid);
+		return NULL;
+	}
+
+	ns->id = nsid;
+	ns->ctrlr = ctrlr;
+	nvme_ctrlr_insert_ns_dynamic(ctrlr, ns);
+	SPDK_DEBUGLOG(nvme, "Allocated NS %u\n", nsid);
+
+	return ns;
+}
+
+static void
+nvme_ctrlr_destruct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
+{
+	/* Controller may fail before ns_ops is set and be destroyed in this state */
+	if (ctrlr->ns_ops) {
+		ctrlr->ns_ops->destruct_namespaces(ctrlr);
+	}
+}
+
+static void
+nvme_ctrlr_update_namespaces(struct spdk_nvme_ctrlr *ctrlr)
+{
+	assert(ctrlr->ns_ops != NULL);
+	ctrlr->ns_ops->update_namespaces(ctrlr);
+}
+
+static int
+nvme_ctrlr_construct_namespaces(struct spdk_nvme_ctrlr *ctrlr)
+{
+	assert(ctrlr->ns_ops != NULL);
+	return ctrlr->ns_ops->construct_namespaces(ctrlr);
+}
+
+static struct spdk_nvme_ns *
+nvme_ctrlr_construct_namespace(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+{
+	assert(ctrlr->ns_ops != NULL);
+	return ctrlr->ns_ops->construct_namespace(ctrlr, nsid);
 }
 
 static void
@@ -3629,14 +3830,44 @@ spdk_nvme_ctrlr_get_next_active_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t prev_
 	return 0;
 }
 
-struct spdk_nvme_ns *
-spdk_nvme_ctrlr_get_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+static struct spdk_nvme_ns *
+nvme_ctrlr_get_ns_static(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 {
-	if (nsid < 1 || nsid > ctrlr->num_ns) {
+	if (spdk_unlikely(nsid < 1 || nsid > ctrlr->num_ns)) {
 		return NULL;
 	}
 
 	return &ctrlr->ns[nsid - 1];
+}
+
+static struct spdk_nvme_ns *
+nvme_ctrlr_get_ns_dynamic(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+{
+	struct spdk_nvme_ns *ns;
+
+	nvme_robust_mutex_lock(&ctrlr->ctrlr_lock);
+	STAILQ_FOREACH(ns, &ctrlr->ns_list, link) {
+		if (ns->id == nsid) {
+			nvme_robust_mutex_unlock(&ctrlr->ctrlr_lock);
+			return ns;
+		}
+	}
+
+	nvme_robust_mutex_unlock(&ctrlr->ctrlr_lock);
+	return NULL;
+}
+
+struct spdk_nvme_ns *
+spdk_nvme_ctrlr_get_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid) {
+	/*
+	 * User may call this function before controller is fully initialized.
+	 * We should not crash in this case.
+	 */
+	if (spdk_likely(ctrlr->ns_ops)) {
+		return ctrlr->ns_ops->get_ns(ctrlr, nsid);
+	} else {
+		return NULL;
+	}
 }
 
 struct spdk_pci_device *
@@ -3748,7 +3979,14 @@ spdk_nvme_ctrlr_attach_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid,
 	}
 
 	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
-	assert(ns != NULL);
+	if (!ns) {
+		ns = nvme_ctrlr_construct_namespace(ctrlr, nsid);
+		if (!ns) {
+			SPDK_ERRLOG("Failed to construct namespace %u\n", nsid);
+			return -ENOMEM;
+		}
+	}
+
 	return nvme_ns_construct(ns, nsid, ctrlr);
 }
 
@@ -3787,9 +4025,10 @@ spdk_nvme_ctrlr_detach_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid,
 	}
 
 	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
-	assert(ns != NULL);
-	/* Inactive NS */
-	nvme_ns_destruct(ns);
+	if (ns) {
+		/* Inactive NS */
+		nvme_ns_destruct(ns);
+	}
 
 	return 0;
 }
@@ -3822,9 +4061,16 @@ spdk_nvme_ctrlr_create_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns_dat
 	}
 
 	nsid = status->cpl.cdw0;
-	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
-	assert(ns != NULL);
 	free(status);
+	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+	if (!ns) {
+		ns = nvme_ctrlr_construct_namespace(ctrlr, nsid);
+		if (!ns) {
+			SPDK_ERRLOG("Failed to construct namespace %u\n", nsid);
+			return 0;
+		}
+	}
+
 	/* Inactive NS */
 	res = nvme_ns_construct(ns, nsid, ctrlr);
 	if (res) {
@@ -3868,8 +4114,9 @@ spdk_nvme_ctrlr_delete_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 	}
 
 	ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
-	assert(ns != NULL);
-	nvme_ns_destruct(ns);
+	if (ns) {
+		nvme_ns_destruct(ns);
+	}
 
 	return 0;
 }
@@ -4244,3 +4491,33 @@ spdk_nvme_map_prps(void *prv, struct spdk_nvme_cmd *cmd, struct iovec *iovs,
 
 	return iovcnt;
 }
+
+static void
+nvme_ctrlr_init_namespaces_static(struct spdk_nvme_ctrlr *ctrlr) {
+	SPDK_NOTICELOG("Controller %p uses static NS allocation\n", ctrlr);
+	ctrlr->ns = NULL;
+}
+
+static struct spdk_nvme_ctrlr_ns_ops ns_ops_static = {
+	.init_namespaces = nvme_ctrlr_init_namespaces_static,
+	.construct_namespaces = nvme_ctrlr_construct_namespaces_static,
+	.destruct_namespaces = nvme_ctrlr_destruct_namespaces_static,
+	.update_namespaces = nvme_ctrlr_update_namespaces_static,
+	.construct_namespace = nvme_ctrlr_construct_namespace_static,
+	.get_ns = nvme_ctrlr_get_ns_static,
+};
+
+static void
+nvme_ctrlr_init_namespaces_dynamic(struct spdk_nvme_ctrlr *ctrlr) {
+	SPDK_NOTICELOG("Controller %p uses dynamic NS allocation\n", ctrlr);
+	STAILQ_INIT(&ctrlr->ns_list);
+}
+
+static struct spdk_nvme_ctrlr_ns_ops ns_ops_dynamic = {
+	.init_namespaces = nvme_ctrlr_init_namespaces_dynamic,
+	.construct_namespaces = nvme_ctrlr_construct_namespaces_dynamic,
+	.destruct_namespaces = nvme_ctrlr_destruct_namespaces_dynamic,
+	.update_namespaces = nvme_ctrlr_update_namespaces_dynamic,
+	.construct_namespace = nvme_ctrlr_construct_namespace_dynamic,
+	.get_ns = nvme_ctrlr_get_ns_dynamic,
+};

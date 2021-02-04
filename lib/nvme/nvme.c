@@ -2,7 +2,7 @@
  *   BSD LICENSE
  *
  *   Copyright (c) Intel Corporation. All rights reserved.
- *   Copyright (c) 2020 Mellanox Technologies LTD. All rights reserved.
+ *   Copyright (c) 2020, 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -963,11 +963,12 @@ nvme_ctrlr_opts_init(struct spdk_nvme_ctrlr_opts *opts,
 	SET_FIELD(transport_ack_timeout);
 	SET_FIELD(admin_queue_size);
 	SET_FIELD(fabrics_connect_timeout_us);
+	SET_FIELD(dynamic_ns_threshold);
 
 	/* Do not remove this statement. When you add a new field, please do update this
 	 * assert with the correct size. And do not forget to add a new SET_FIELD statement
 	 * related with your new added field. */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_ctrlr_opts) == 608, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_ctrlr_opts) == 616, "Incorrect size");
 
 #undef FIELD_OK
 #undef SET_FIELD

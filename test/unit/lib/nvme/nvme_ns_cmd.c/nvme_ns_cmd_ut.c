@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -580,7 +580,7 @@ static void
 test_nvme_ns_cmd_write_zeroes(void)
 {
 	struct spdk_nvme_ns	ns = { 0 };
-	struct spdk_nvme_ctrlr	ctrlr = { 0 };
+	struct spdk_nvme_ctrlr	ctrlr = {};
 	struct spdk_nvme_qpair	qpair;
 	spdk_nvme_cmd_cb	cb_fn = NULL;
 	void			*cb_arg = NULL;
@@ -607,7 +607,7 @@ static void
 test_nvme_ns_cmd_write_uncorrectable(void)
 {
 	struct spdk_nvme_ns	ns = { 0 };
-	struct spdk_nvme_ctrlr	ctrlr = { 0 };
+	struct spdk_nvme_ctrlr	ctrlr = {};
 	struct spdk_nvme_qpair	qpair;
 	spdk_nvme_cmd_cb	cb_fn = NULL;
 	void			*cb_arg = NULL;
