@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -1030,12 +1030,10 @@ bdev_ocssd_poll_mm(void *ctx)
 	struct nvme_bdev_ctrlr *nvme_bdev_ctrlr = ctx;
 	struct nvme_bdev_ns *nvme_ns;
 	struct bdev_ocssd_ns *ocssd_ns;
-	uint32_t nsid;
 	int rc;
 
-	for (nsid = 0; nsid < nvme_bdev_ctrlr->num_ns; ++nsid) {
-		nvme_ns = nvme_bdev_ctrlr->namespaces[nsid];
-		if (nvme_ns == NULL || !nvme_ns->populated) {
+	STAILQ_FOREACH(nvme_ns, &nvme_bdev_ctrlr->ns_list, link) {
+		if (!nvme_ns->populated) {
 			continue;
 		}
 
@@ -1046,7 +1044,7 @@ bdev_ocssd_poll_mm(void *ctx)
 
 			rc = spdk_nvme_ctrlr_cmd_get_log_page(nvme_bdev_ctrlr->ctrlr,
 							      SPDK_OCSSD_LOG_CHUNK_NOTIFICATION,
-							      nsid + 1, ocssd_ns->chunk,
+							      nvme_ns->id, ocssd_ns->chunk,
 							      sizeof(ocssd_ns->chunk[0]) *
 							      CHUNK_NOTIFICATION_ENTRY_COUNT,
 							      0, bdev_ocssd_chunk_notification_cb,
@@ -1067,11 +1065,9 @@ bdev_ocssd_handle_chunk_notification(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr)
 {
 	struct bdev_ocssd_ns *ocssd_ns;
 	struct nvme_bdev_ns *nvme_ns;
-	uint32_t nsid;
 
-	for (nsid = 0; nsid < nvme_bdev_ctrlr->num_ns; ++nsid) {
-		nvme_ns = nvme_bdev_ctrlr->namespaces[nsid];
-		if (nvme_ns == NULL || !nvme_ns->populated) {
+	STAILQ_FOREACH(nvme_ns, &nvme_bdev_ctrlr->ns_list, link) {
+		if (!nvme_ns->populated) {
 			continue;
 		}
 
@@ -1269,8 +1265,8 @@ bdev_ocssd_create_bdev(const char *ctrlr_name, const char *bdev_name, uint32_t n
 		goto error;
 	}
 
-	assert(nsid <= nvme_bdev_ctrlr->num_ns);
-	nvme_ns = nvme_bdev_ctrlr->namespaces[nsid - 1];
+	assert(nsid <= spdk_nvme_ctrlr_get_num_ns(nvme_bdev_ctrlr->ctrlr));
+	nvme_ns = nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, nsid);
 	if (nvme_ns == NULL) {
 		SPDK_ERRLOG("Namespace %"PRIu32" is not initialized\n", nsid);
 		rc = -EINVAL;

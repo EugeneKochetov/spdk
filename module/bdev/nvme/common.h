@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -67,6 +67,7 @@ struct nvme_bdev_ns {
 	struct nvme_bdev_ctrlr	*ctrlr;
 	TAILQ_HEAD(, nvme_bdev)	bdevs;
 	void			*type_ctx;
+	STAILQ_ENTRY(nvme_bdev_ns)	link;
 };
 
 struct ocssd_bdev_ctrlr;
@@ -96,9 +97,8 @@ struct nvme_bdev_ctrlr {
 	 * NVMe controllers are not included.
 	 */
 	uint32_t				prchk_flags;
-	uint32_t				num_ns;
-	/** Array of pointers to namespaces indexed by nsid - 1 */
-	struct nvme_bdev_ns			**namespaces;
+	/** List of active namespaces sorted by nsid */
+	STAILQ_HEAD(, nvme_bdev_ns)		ns_list;
 
 	struct spdk_opal_dev			*opal_dev;
 
@@ -173,6 +173,8 @@ void nvme_bdev_dump_trid_json(const struct spdk_nvme_transport_id *trid,
 void nvme_bdev_ctrlr_destruct(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr);
 void nvme_bdev_ctrlr_do_destruct(void *ctx);
 void nvme_bdev_ns_detach(struct nvme_bdev_ns *nvme_ns);
+struct nvme_bdev_ns *nvme_ctrlr_get_namespace(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr,
+					      uint32_t nsid);
 
 static inline bool
 bdev_nvme_find_io_path(struct nvme_bdev *nbdev, struct nvme_io_channel *nvme_ch,

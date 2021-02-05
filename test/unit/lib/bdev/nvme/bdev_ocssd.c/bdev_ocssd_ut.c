@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -192,6 +192,7 @@ nvme_ctrlr_populate_namespace_done(struct nvme_async_probe_ctx *ctx,
 {
 	CU_ASSERT_EQUAL(rc, 0);
 	ns->ctrlr->ref++;
+	ns->populated = true;
 }
 
 void
@@ -216,28 +217,29 @@ create_nvme_bdev_controller(const struct spdk_nvme_transport_id *trid, const cha
 	nvme_bdev_ctrlr = calloc(1, sizeof(*nvme_bdev_ctrlr));
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr != NULL);
 
-	nvme_bdev_ctrlr->namespaces = calloc(ctrlr->ns_count, sizeof(struct nvme_bdev_ns *));
-	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr->namespaces != NULL);
+	STAILQ_INIT(&nvme_bdev_ctrlr->ns_list);
 
 	trid_entry = calloc(1, sizeof(struct nvme_bdev_ctrlr_trid));
 	SPDK_CU_ASSERT_FATAL(trid_entry != NULL);
 	trid_entry->trid = *trid;
 
 	nvme_bdev_ctrlr->ctrlr = ctrlr;
-	nvme_bdev_ctrlr->num_ns = ctrlr->ns_count;
 	nvme_bdev_ctrlr->ref = 1;
 	nvme_bdev_ctrlr->connected_trid = &trid_entry->trid;
 	nvme_bdev_ctrlr->name = strdup(name);
 	for (nsid = 0; nsid < ctrlr->ns_count; ++nsid) {
-		nvme_bdev_ctrlr->namespaces[nsid] = calloc(1, sizeof(struct nvme_bdev_ns));
-		SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr->namespaces[nsid] != NULL);
+		struct nvme_bdev_ns *ns;
 
-		nvme_bdev_ctrlr->namespaces[nsid]->id = nsid + 1;
-		nvme_bdev_ctrlr->namespaces[nsid]->ctrlr = nvme_bdev_ctrlr;
-		nvme_bdev_ctrlr->namespaces[nsid]->type = NVME_BDEV_NS_OCSSD;
-		TAILQ_INIT(&nvme_bdev_ctrlr->namespaces[nsid]->bdevs);
+		ns = calloc(1, sizeof(struct nvme_bdev_ns));
+		SPDK_CU_ASSERT_FATAL(ns != NULL);
+		STAILQ_INSERT_TAIL(&nvme_bdev_ctrlr->ns_list, ns, link);
 
-		bdev_ocssd_populate_namespace(nvme_bdev_ctrlr, nvme_bdev_ctrlr->namespaces[nsid], NULL);
+		ns->id = nsid + 1;
+		ns->ctrlr = nvme_bdev_ctrlr;
+		ns->type = NVME_BDEV_NS_OCSSD;
+		TAILQ_INIT(&ns->bdevs);
+
+		bdev_ocssd_populate_namespace(nvme_bdev_ctrlr, ns, NULL);
 	}
 
 	while (spdk_thread_poll(g_thread, 0, 0) > 0) {}
@@ -526,12 +528,12 @@ create_bdev(const char *ctrlr_name, const char *bdev_name, uint32_t nsid)
 static void
 delete_nvme_bdev_controller(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr)
 {
-	uint32_t nsid;
+	struct nvme_bdev_ns *ns, *tmp;
 
 	nvme_bdev_ctrlr->destruct = true;
 
-	for (nsid = 0; nsid < nvme_bdev_ctrlr->num_ns; ++nsid) {
-		bdev_ocssd_depopulate_namespace(nvme_bdev_ctrlr->namespaces[nsid]);
+	STAILQ_FOREACH_SAFE(ns, &nvme_bdev_ctrlr->ns_list, link, tmp) {
+		bdev_ocssd_depopulate_namespace(ns);
 	}
 
 	nvme_bdev_ctrlr_destruct(nvme_bdev_ctrlr);
@@ -708,8 +710,8 @@ test_lba_translation(void)
 	nvme_bdev_ctrlr = create_nvme_bdev_controller(&trid, controller_name);
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr != NULL);
 
-	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr->namespaces[0] != NULL);
-	ocssd_ns = bdev_ocssd_get_ns_from_nvme(nvme_bdev_ctrlr->namespaces[0]);
+	SPDK_CU_ASSERT_FATAL(STAILQ_FIRST(&nvme_bdev_ctrlr->ns_list) != NULL);
+	ocssd_ns = bdev_ocssd_get_ns_from_nvme(STAILQ_FIRST(&nvme_bdev_ctrlr->ns_list));
 
 	rc = create_bdev(controller_name, bdev_name, 1);
 	CU_ASSERT_EQUAL(rc, 0);
@@ -763,8 +765,8 @@ test_lba_translation(void)
 	nvme_bdev_ctrlr = create_nvme_bdev_controller(&trid, controller_name);
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr != NULL);
 
-	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr->namespaces[0] != NULL);
-	ocssd_ns = bdev_ocssd_get_ns_from_nvme(nvme_bdev_ctrlr->namespaces[0]);
+	SPDK_CU_ASSERT_FATAL(STAILQ_FIRST(&nvme_bdev_ctrlr->ns_list) != NULL);
+	ocssd_ns = bdev_ocssd_get_ns_from_nvme(STAILQ_FIRST(&nvme_bdev_ctrlr->ns_list));
 
 	rc = create_bdev(controller_name, bdev_name, 1);
 	CU_ASSERT_EQUAL(rc, 0);

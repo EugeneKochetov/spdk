@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -417,6 +417,34 @@ uint32_t
 spdk_nvme_ctrlr_get_num_ns(struct spdk_nvme_ctrlr *ctrlr)
 {
 	return ctrlr->num_ns;
+}
+
+uint32_t
+spdk_nvme_ctrlr_get_first_active_ns(struct spdk_nvme_ctrlr *ctrlr)
+{
+	uint32_t i;
+
+	for (i = 0; i < ctrlr->num_ns; ++i) {
+		if (ctrlr->ns[i].is_active) {
+			return i + 1;
+		}
+	}
+
+	return 0;
+}
+
+uint32_t
+spdk_nvme_ctrlr_get_next_active_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t prev_nsid)
+{
+	uint32_t i;
+
+	for (i = 0; i < ctrlr->num_ns; ++i) {
+		if (((i+1) > prev_nsid) && ctrlr->ns[i].is_active) {
+			return i + 1;
+		}
+	}
+
+	return 0;
 }
 
 struct spdk_nvme_ns *
@@ -1290,7 +1318,7 @@ test_attach_ctrlr(void)
 	nvme_bdev_ctrlr = nvme_bdev_ctrlr_get_by_name("nvme0");
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr != NULL);
 	CU_ASSERT(nvme_bdev_ctrlr->ctrlr == ctrlr);
-	CU_ASSERT(nvme_bdev_ctrlr->num_ns == 0);
+	CU_ASSERT(STAILQ_EMPTY(&nvme_bdev_ctrlr->ns_list));
 
 	rc = bdev_nvme_delete("nvme0");
 	CU_ASSERT(rc == 0);
@@ -1319,7 +1347,7 @@ test_attach_ctrlr(void)
 	nvme_bdev_ctrlr = nvme_bdev_ctrlr_get_by_name("nvme0");
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr != NULL);
 	CU_ASSERT(nvme_bdev_ctrlr->ctrlr == ctrlr);
-	CU_ASSERT(nvme_bdev_ctrlr->num_ns == 1);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 1) != NULL);
 
 	CU_ASSERT(attached_names[0] != NULL && strcmp(attached_names[0], "nvme0n1") == 0);
 	attached_names[0] = NULL;
@@ -1433,13 +1461,12 @@ test_aer_cb(void)
 	nvme_bdev_ctrlr = nvme_bdev_ctrlr_get_by_name("nvme0");
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr != NULL);
 
-	CU_ASSERT(nvme_bdev_ctrlr->num_ns == 4);
-	CU_ASSERT(nvme_bdev_ctrlr->namespaces[0]->populated == false);
-	CU_ASSERT(nvme_bdev_ctrlr->namespaces[1]->populated == true);
-	CU_ASSERT(nvme_bdev_ctrlr->namespaces[2]->populated == true);
-	CU_ASSERT(nvme_bdev_ctrlr->namespaces[3]->populated == true);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 1) == NULL);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 2)->populated == true);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 3)->populated == true);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 4)->populated == true);
 
-	bdev = TAILQ_FIRST(&nvme_bdev_ctrlr->namespaces[3]->bdevs);
+	bdev = TAILQ_FIRST(&nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 4)->bdevs);
 	SPDK_CU_ASSERT_FATAL(bdev != NULL);
 	CU_ASSERT(bdev->disk.blockcnt == 1024);
 
@@ -1456,10 +1483,10 @@ test_aer_cb(void)
 
 	aer_cb(nvme_bdev_ctrlr, &cpl);
 
-	CU_ASSERT(nvme_bdev_ctrlr->namespaces[0]->populated == true);
-	CU_ASSERT(nvme_bdev_ctrlr->namespaces[1]->populated == true);
-	CU_ASSERT(nvme_bdev_ctrlr->namespaces[2]->populated == false);
-	CU_ASSERT(nvme_bdev_ctrlr->namespaces[3]->populated == true);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 1)->populated == true);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 2)->populated == true);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 3) == NULL);
+	CU_ASSERT(nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 4)->populated == true);
 	CU_ASSERT(bdev->disk.blockcnt == 2048);
 
 	rc = bdev_nvme_delete("nvme0");
@@ -1571,7 +1598,7 @@ test_submit_nvme_cmd(void)
 	nvme_bdev_ctrlr = nvme_bdev_ctrlr_get_by_name("nvme0");
 	SPDK_CU_ASSERT_FATAL(nvme_bdev_ctrlr != NULL);
 
-	bdev = TAILQ_FIRST(&nvme_bdev_ctrlr->namespaces[0]->bdevs);
+	bdev = TAILQ_FIRST(&nvme_ctrlr_get_namespace(nvme_bdev_ctrlr, 1)->bdevs);
 	SPDK_CU_ASSERT_FATAL(bdev != NULL);
 
 	ch = spdk_get_io_channel(nvme_bdev_ctrlr);

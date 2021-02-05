@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -326,6 +326,7 @@ vbdev_opal_create(const char *nvme_ctrlr_name, uint32_t nsid, uint8_t locking_ra
 	struct vbdev_opal_part_base *opal_part_base = NULL;
 	struct spdk_bdev_part *part_bdev;
 	struct nvme_bdev *nvme_bdev;
+	struct nvme_bdev_ns *nvme_ns;
 
 	if (nsid != NSID_SUPPORTED) {
 		SPDK_ERRLOG("nsid %d not supported", nsid);
@@ -343,6 +344,12 @@ vbdev_opal_create(const char *nvme_ctrlr_name, uint32_t nsid, uint8_t locking_ra
 		return -ENOTSUP;
 	}
 
+	nvme_ns = nvme_ctrlr_get_namespace(nvme_ctrlr, nsid);
+	if (!nvme_ns) {
+		SPDK_ERRLOG("namespace id %u not found\n", nsid);
+		return -ENODEV;
+	}
+
 	opal_bdev = calloc(1, sizeof(struct opal_vbdev));
 	if (!opal_bdev) {
 		SPDK_ERRLOG("allocation for opal_bdev failed\n");
@@ -356,7 +363,7 @@ vbdev_opal_create(const char *nvme_ctrlr_name, uint32_t nsid, uint8_t locking_ra
 	opal_bdev->nvme_ctrlr = nvme_ctrlr;
 	opal_bdev->opal_dev = nvme_ctrlr->opal_dev;
 
-	nvme_bdev = TAILQ_FIRST(&nvme_ctrlr->namespaces[nsid - 1]->bdevs);
+	nvme_bdev = TAILQ_FIRST(&nvme_ns->bdevs);
 	assert(nvme_bdev != NULL);
 	base_bdev_name = nvme_bdev->disk.name;
 
