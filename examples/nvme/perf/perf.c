@@ -285,6 +285,7 @@ static uint32_t g_quiet_count = 1;
 		__count++;						\
 	}
 
+static uint32_t g_dynamic_ns_threshold;
 static const char *g_core_mask;
 
 #define MAX_ALLOWED_PCI_DEVICE_NUM 128
@@ -1590,6 +1591,7 @@ static void usage(char *program_name)
 	printf("\t[-A IO buffer alignment. Must be power of 2 and not less than cache line (%u)]\n",
 	       SPDK_CACHE_LINE_SIZE);
 	printf("\t[-S set the default sock impl, e.g. \"posix\"]\n");
+	printf("\t[-Y dynamic namespace allocation threshold, default: 0 (always use static allocation)]\n");
 #ifdef SPDK_CONFIG_URING
 	printf("\t[-R enable using liburing to drive kernel devices (Default: libaio)]\n");
 #endif
@@ -2022,7 +2024,7 @@ parse_args(int argc, char **argv)
 	int rc;
 
 	while ((op = getopt(argc, argv,
-			    "a:b:c:e:gi:lo:q:r:k:s:t:w:z:A:C:DGHILM:NO:P:Q:RS:T:U:VZ:")) != -1) {
+			    "a:b:c:e:gi:lo:q:r:k:s:t:w:z:A:C:DGHILM:NO:P:Q:RS:T:U:VY:Z:")) != -1) {
 		switch (op) {
 		case 'a':
 		case 'A':
@@ -2038,6 +2040,7 @@ parse_args(int argc, char **argv)
 		case 'M':
 		case 'Q':
 		case 'U':
+		case 'Y':
 			val = spdk_strtol(optarg, 10);
 			if (val < 0) {
 				fprintf(stderr, "Converting a string to integer failed\n");
@@ -2094,6 +2097,8 @@ parse_args(int argc, char **argv)
 				}
 				g_io_align_specified = true;
 				break;
+			case 'Y':
+				g_dynamic_ns_threshold = val;
 			}
 			break;
 		case 'b':
@@ -2343,6 +2348,7 @@ probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	opts->data_digest = g_data_digest;
 	opts->keep_alive_timeout_ms = g_keep_alive_timeout_in_ms;
 	memcpy(opts->hostnqn, trid_entry->hostnqn, sizeof(opts->hostnqn));
+	opts->dynamic_ns_threshold = g_dynamic_ns_threshold;
 
 	return true;
 }
