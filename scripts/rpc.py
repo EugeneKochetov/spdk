@@ -455,7 +455,8 @@ if __name__ == "__main__":
                                        nvme_adminq_poll_period_us=args.nvme_adminq_poll_period_us,
                                        nvme_ioq_poll_period_us=args.nvme_ioq_poll_period_us,
                                        io_queue_requests=args.io_queue_requests,
-                                       delay_cmd_submit=args.delay_cmd_submit)
+                                       delay_cmd_submit=args.delay_cmd_submit,
+                                       dynamic_ns_threshold=args.dynamic_ns_threshold)
 
     p = subparsers.add_parser('bdev_nvme_set_options', aliases=['set_bdev_nvme_options'],
                               help='Set options for the bdev nvme type. This is startup command.')
@@ -484,6 +485,8 @@ if __name__ == "__main__":
     p.add_argument('-d', '--disable-delay-cmd-submit',
                    help='Disable delaying NVMe command submission, i.e. no batching of multiple commands',
                    action='store_false', dest='delay_cmd_submit', default=True)
+    p.add_argument('-y', '--dynamic-ns-threshold',
+                   help='The threshold for number of namespaces to use dynamic namespace allocation. Default: 0', type=int)
     p.set_defaults(func=bdev_nvme_set_options)
 
     def bdev_nvme_set_hotplug(args):

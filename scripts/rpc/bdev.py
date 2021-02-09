@@ -411,7 +411,7 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, keep_
                           retry_count=None, arbitration_burst=None, low_priority_weight=None,
                           medium_priority_weight=None, high_priority_weight=None,
                           nvme_adminq_poll_period_us=None, nvme_ioq_poll_period_us=None, io_queue_requests=None,
-                          delay_cmd_submit=None):
+                          delay_cmd_submit=None, dynamic_ns_threshold=None):
     """Set options for the bdev nvme. This is startup command.
 
     Args:
@@ -466,7 +466,10 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, keep_
     if delay_cmd_submit is not None:
         params['delay_cmd_submit'] = delay_cmd_submit
 
-    return client.call('bdev_nvme_set_options', params)
+    if dynamic_ns_threshold is not None:
+        params['dynamic_ns_threshold'] = dynamic_ns_threshold
+
+        return client.call('bdev_nvme_set_options', params)
 
 
 @deprecated_alias('set_bdev_nvme_hotplug')

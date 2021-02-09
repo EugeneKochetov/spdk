@@ -31,7 +31,9 @@ allocation enabled it may return NULL pointer for valid but inactive
 namespace IDs. Also dynamic version of `spdk_nvme_ctrlr_get_ns` has
 higher complexity and shall be avoided in data path. Dynamic namespace
 allocation feature is controlled by `dynamic_ns_threshold` controller
-option and is disabled by default to keep backward compatibility.
+option and is disabled by default to keep backward
+compatibility. `dynamic_ns_threshold` parameter was also added to
+`bdev_nvme_set_options` RPC method.
 
 ## v21.01:
 
