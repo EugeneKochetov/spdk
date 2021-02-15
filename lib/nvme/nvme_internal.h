@@ -501,6 +501,11 @@ struct spdk_nvme_ns {
 	/* Zoned Namespace Command Set Specific Identify Namespace data. */
 	struct spdk_nvme_zns_ns_data	*nsdata_zns;
 
+	/*
+	 * Reference counter to track users who own pointer to this namespaces.
+	 * Used with dynamic namespace allocation.
+	 */
+	uint32_t			ref;
 	STAILQ_ENTRY(spdk_nvme_ns)	link;
 };
 
@@ -734,6 +739,7 @@ struct spdk_nvme_ctrlr_ns_ops {
 	void (*update_namespaces)(struct spdk_nvme_ctrlr *);
 	struct spdk_nvme_ns * (*construct_namespace)(struct spdk_nvme_ctrlr *, uint32_t);
 	struct spdk_nvme_ns *(*get_ns)(struct spdk_nvme_ctrlr *, uint32_t);
+	void (*put_ns)(struct spdk_nvme_ns *);
 };
 
 /*

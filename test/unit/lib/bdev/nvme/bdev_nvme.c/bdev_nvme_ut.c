@@ -457,6 +457,12 @@ spdk_nvme_ctrlr_get_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 	return &ctrlr->ns[nsid - 1];
 }
 
+void
+spdk_nvme_ctrlr_put_ns(struct spdk_nvme_ns *ns)
+{
+	CU_ASSERT(ns != NULL);
+}
+
 bool
 spdk_nvme_ctrlr_is_active_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 {

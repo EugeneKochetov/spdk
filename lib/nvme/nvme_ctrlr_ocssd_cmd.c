@@ -51,7 +51,10 @@ spdk_nvme_ctrlr_is_ocssd_supported(struct spdk_nvme_ctrlr *ctrlr)
 			struct spdk_nvme_ns *ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 
 			if (ns && ns->nsdata.vendor_specific[0] == 0x1) {
+				spdk_nvme_ctrlr_put_ns(ns);
 				return true;
+			} else if (ns) {
+				spdk_nvme_ctrlr_put_ns(ns);
 			}
 		}
 	}

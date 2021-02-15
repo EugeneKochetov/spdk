@@ -1653,6 +1653,10 @@ struct spdk_nvme_ns;
  * performance critical sections. It is recommended for applications
  * to save the namespace handle and use it in fast path.
  *
+ * With dynamic namespace allocation user shall release namespace
+ * handle with spdk_nvme_ctrlr_put_ns() function when it is not needed
+ * anymore, e.g. when namespace was removed.
+ *
  * This function is thread safe and can be called at any point while the controller
  * is attached to the SPDK NVMe driver.
  *
@@ -1663,6 +1667,24 @@ struct spdk_nvme_ns;
  * invalid or namespace is inactive and not allocated.
  */
 struct spdk_nvme_ns *spdk_nvme_ctrlr_get_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t ns_id);
+
+/**
+ * Release a handle to a namespace.
+ *
+ * This function shall be used with dynamic namespace allocation to
+ * release unused namespace handles, e.g. when namespace was
+ * removed. This allows SPDK to free memory used by inactive
+ * namespaces.
+ *
+ * It is not required to call this function with static namespace
+ * allocation.
+ *
+ * This function is thread safe and can be called at any point while the controller
+ * is attached to the SPDK NVMe driver.
+ *
+ * \param ns Opaque handle to NVMe namespace.
+ */
+void spdk_nvme_ctrlr_put_ns(struct spdk_nvme_ns *ns);
 
 /**
  * Get a specific log page from the NVMe controller.

@@ -310,6 +310,7 @@ cuse_nvme_submit_io_write_cb(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, void 
 				    ctx->lba, /* LBA start */
 				    ctx->lba_count, /* number of LBAs */
 				    cuse_nvme_submit_io_write_done, ctx, 0);
+	spdk_nvme_ctrlr_put_ns(ns);
 	if (rc != 0) {
 		goto err;
 	}
@@ -392,6 +393,7 @@ cuse_nvme_submit_io_read_cb(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, void *
 				   ctx->lba, /* LBA start */
 				   ctx->lba_count, /* number of LBAs */
 				   cuse_nvme_submit_io_read_done, ctx, 0);
+	spdk_nvme_ctrlr_put_ns(ns);
 	if (rc != 0) {
 		goto err;
 	}
@@ -470,6 +472,7 @@ cuse_nvme_submit_io(fuse_req_t req, int cmd, void *arg,
 	}
 
 	block_size = spdk_nvme_ns_get_sector_size(ns);
+	spdk_nvme_ctrlr_put_ns(ns);
 
 	switch (user_io->opcode) {
 	case SPDK_NVME_OPC_READ:
@@ -524,6 +527,7 @@ cuse_blkgetsize64(fuse_req_t req, int cmd, void *arg,
 	}
 
 	size = spdk_nvme_ns_get_num_sectors(ns);
+	spdk_nvme_ctrlr_put_ns(ns);
 	fuse_reply_ioctl(req, 0, &size, sizeof(size));
 }
 
@@ -546,6 +550,7 @@ cuse_blkpbszget(fuse_req_t req, int cmd, void *arg,
 	}
 
 	pbsz = spdk_nvme_ns_get_sector_size(ns);
+	spdk_nvme_ctrlr_put_ns(ns);
 	fuse_reply_ioctl(req, 0, &pbsz, sizeof(pbsz));
 }
 
@@ -569,6 +574,7 @@ cuse_blkgetsize(fuse_req_t req, int cmd, void *arg,
 
 	/* return size in 512 bytes blocks */
 	size = spdk_nvme_ns_get_num_sectors(ns) * 512 / spdk_nvme_ns_get_sector_size(ns);
+	spdk_nvme_ctrlr_put_ns(ns);
 	fuse_reply_ioctl(req, 0, &size, sizeof(size));
 }
 

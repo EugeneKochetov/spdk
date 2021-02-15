@@ -35,6 +35,17 @@ option and is disabled by default to keep backward
 compatibility. `dynamic_ns_threshold` parameter was also added to
 `bdev_nvme_set_options` RPC method.
 
+Added namespace reference counter for dynamic namespace
+allocation. `spdk_nvme_ctrlr_get_ns` function increments the
+counter. New `spdk_nvme_ctrlr_put_ns` function releases namespace
+handle and decrements the counter. When reference counter reaches zero
+for inactive namespace, its memory is released. User shall call
+`spdk_nvme_ctrlr_put_ns` for unused namespaces, e.g. when namespace is
+removed. It is not mandatory to release namespace. But in this case
+memory consumption will grow when more and more different namespace
+IDs are added and removed. In the limit it will consume as much memory
+as static allocation method. Though the memory may be more fragmented.
+
 ## v21.01:
 
 ### idxd

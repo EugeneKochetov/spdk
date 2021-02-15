@@ -376,6 +376,12 @@ spdk_nvme_ctrlr_get_ns(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 	return &ctrlr->ns[nsid - 1];
 }
 
+void
+spdk_nvme_ctrlr_put_ns(struct spdk_nvme_ns *ns)
+{
+	return;
+}
+
 #define DECLARE_AND_CONSTRUCT_CTRLR()		\
 	struct spdk_nvme_ctrlr	ctrlr = {};	\
 	struct spdk_nvme_qpair	adminq = {};	\

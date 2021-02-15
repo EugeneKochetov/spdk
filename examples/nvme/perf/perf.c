@@ -1164,6 +1164,9 @@ unregister_namespaces(void)
 	struct ns_entry *entry, *tmp;
 
 	TAILQ_FOREACH_SAFE(entry, &g_namespaces, link, tmp) {
+		if (entry->type == ENTRY_TYPE_NVME_NS) {
+			spdk_nvme_ctrlr_put_ns(entry->u.nvme.ns);
+		}
 		TAILQ_REMOVE(&g_namespaces, entry, link);
 		free(entry);
 	}

@@ -98,6 +98,7 @@ spdk_nvme_ctrlr_cmd_io_raw_with_md(struct spdk_nvme_ctrlr *ctrlr,
 		if (ns) {
 			assert(ns->sector_size != 0);
 			md_len =  len / ns->sector_size * ns->md_size;
+			spdk_nvme_ctrlr_put_ns(ns);
 		}
 	}
 

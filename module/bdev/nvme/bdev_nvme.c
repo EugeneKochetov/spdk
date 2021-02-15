@@ -1381,6 +1381,9 @@ nvme_ctrlr_populate_namespace_done(struct nvme_async_probe_ctx *ctx,
 		pthread_mutex_unlock(&g_bdev_nvme_mutex);
 	} else {
 		STAILQ_REMOVE(&nvme_ns->ctrlr->ns_list, nvme_ns, nvme_bdev_ns, link);
+		if (nvme_ns->ns) {
+			spdk_nvme_ctrlr_put_ns(nvme_ns->ns);
+		}
 		free(nvme_ns);
 	}
 
@@ -1421,7 +1424,6 @@ nvme_ctrlr_populate_namespaces(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr,
 {
 	struct spdk_nvme_ctrlr	*ctrlr = nvme_bdev_ctrlr->ctrlr;
 	struct nvme_bdev_ns	*nvme_ns, *tmp;
-	struct spdk_nvme_ns	*ns;
 	struct nvme_bdev	*bdev;
 	uint32_t		nsid;
 	int			rc;
@@ -1441,8 +1443,7 @@ nvme_ctrlr_populate_namespaces(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr,
 
 		if (nvme_ns->populated && ns_is_active && nvme_ns->type == NVME_BDEV_NS_STANDARD) {
 			/* NS is still there but attributes may have changed */
-			ns = spdk_nvme_ctrlr_get_ns(ctrlr, nvme_ns->id);
-			num_sectors = spdk_nvme_ns_get_num_sectors(ns);
+			num_sectors = spdk_nvme_ns_get_num_sectors(nvme_ns->ns);
 			bdev = TAILQ_FIRST(&nvme_ns->bdevs);
 			if (bdev->disk.blockcnt != num_sectors) {
 				SPDK_NOTICELOG("NSID %u is resized: bdev name %s, old size %" PRIu64 ", new size %" PRIu64 "\n",
@@ -1918,9 +1919,13 @@ bdev_nvme_add_trid(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr, struct spdk_nvme_ctr
 
 		new_ns = spdk_nvme_ctrlr_get_ns(new_ctrlr, nvme_ns->id);
 		if (!new_ns || bdev_nvme_compare_ns(nvme_ns->ns, new_ns) != 0) {
+			if (new_ns) {
+				spdk_nvme_ctrlr_put_ns(new_ns);
+			}
 			rc = -EINVAL;
 			goto exit;
 		}
+		spdk_nvme_ctrlr_put_ns(new_ns);
 	}
 
 	new_trid = calloc(1, sizeof(*new_trid));

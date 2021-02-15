@@ -128,6 +128,7 @@ nvme_bdev_unregister_cb(void *io_device)
 
 	while ((ns = STAILQ_FIRST(&nvme_bdev_ctrlr->ns_list)) != NULL) {
 		STAILQ_REMOVE_HEAD(&nvme_bdev_ctrlr->ns_list, link);
+		spdk_nvme_ctrlr_put_ns(ns->ns);
 		free(ns);
 	}
 
@@ -201,6 +202,7 @@ nvme_bdev_ns_detach(struct nvme_bdev_ns *nvme_ns)
 
 	if (!nvme_ns->populated && TAILQ_EMPTY(&nvme_ns->bdevs)) {
 		STAILQ_REMOVE(&nvme_bdev_ctrlr->ns_list, nvme_ns, nvme_bdev_ns, link);
+		spdk_nvme_ctrlr_put_ns(nvme_ns->ns);
 		free(nvme_ns);
 	}
 

@@ -1239,7 +1239,7 @@ bdev_ocssd_create_bdev(const char *ctrlr_name, const char *bdev_name, uint32_t n
 	struct bdev_ocssd_create_ctx *create_ctx = NULL;
 	struct nvme_bdev *nvme_bdev = NULL;
 	struct ocssd_bdev *ocssd_bdev = NULL;
-	struct spdk_nvme_ns *ns;
+	struct spdk_nvme_ns *ns = NULL;
 	struct nvme_bdev_ns *nvme_ns;
 	struct bdev_ocssd_ns *ocssd_ns;
 	struct spdk_ocssd_geometry_data *geometry;
@@ -1344,8 +1344,12 @@ bdev_ocssd_create_bdev(const char *ctrlr_name, const char *bdev_name, uint32_t n
 		goto error;
 	}
 
+	spdk_nvme_ctrlr_put_ns(ns);
 	return;
 error:
+	if (ns) {
+		spdk_nvme_ctrlr_put_ns(ns);
+	}
 	bdev_ocssd_free_bdev(ocssd_bdev);
 	cb_fn(NULL, rc, cb_arg);
 	free(create_ctx);
@@ -1481,6 +1485,10 @@ bdev_ocssd_populate_namespace(struct nvme_bdev_ctrlr *nvme_bdev_ctrlr,
 	return;
 
 error:
+	if (ns) {
+		spdk_nvme_ctrlr_put_ns(ns);
+		nvme_ns->ns = NULL;
+	}
 	nvme_ctrlr_populate_namespace_done(nvme_ctx, nvme_ns, rc);
 }
 
